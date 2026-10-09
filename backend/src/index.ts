@@ -1,0 +1,1827 @@
+import express from 'express';
+import cors from 'cors';
+import * as dotenv from 'dotenv';
+import * as path from 'path';
+import stream from 'stream';
+import { google } from 'googleapis';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+import { prisma } from './services/db';
+
+// Load .env
+dotenv.config({ path: path.join(__dirname, '../.env') });
+
+const app = express();
+const port = process.env.PORT || 3000;
+
+// Enable robust CORS middleware
+app.use(cors({
+  origin: true,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+}));
+app.options('*', cors());
+
+app.use(express.json({ limit: '10mb' }));
+
+// Helper to get Google Auth Client
+function getGoogleAuthClient() {
+  const clientID = process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  const redirectURI = process.env.GOOGLE_REDIRECT_URI || 'http://localhost:3000/api/auth/google/callback';
+  const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+
+  if (!clientID || !clientSecret || !refreshToken) {
+    return null;
+  }
+
+  const oauth2Client = new google.auth.OAuth2(clientID, clientSecret, redirectURI);
+  oauth2Client.setCredentials({ refresh_token: refreshToken });
+  return oauth2Client;
+}
+
+// Helper to safely extract clean Google Drive folder ID
+function extractGoogleDriveFolderId(input?: string | null): string {
+  if (!input) return 'root';
+  const trimmed = input.trim();
+  if (!trimmed) return 'root';
+
+  const urlMatch = trimmed.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+  if (urlMatch && urlMatch[1]) {
+    return urlMatch[1];
+  }
+  const queryMatch = trimmed.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  if (queryMatch && queryMatch[1]) {
+    return queryMatch[1];
+  }
+  const segments = trimmed.split(/[\/\\]/);
+  const lastSegment = segments[segments.length - 1].trim();
+  return lastSegment || 'root';
+}
+
+// In-memory fallback mock drive files for local development when credentials are not configured
+interface MockFile {
+  id: string;
+  name: string;
+  mimeType: string;
+  size?: string;
+  createdTime: string;
+  dataUrl?: string;
+}
+
+let mockDriveFiles: MockFile[] = [];
+
+// ==========================================
+// 🔓 Auth Endpoints
+// ==========================================
+
+// POST /api/auth/login
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password, rememberMe } = req.body;
+
+  try {
+    const shop = await prisma.shop.findUnique({
+      where: { email },
+    });
+
+    if (!shop || shop.password !== password) {
+      return res.status(401).json({ error: 'メールアドレスまたはパスワードが正しくありません。' });
+    }
+
+    const token = `simulated_token_${shop.id}_${rememberMe ? 'long' : 'short'}`;
+
+    return res.json({
+      token,
+      shop: {
+        id: shop.id,
+        name: shop.name,
+        email: shop.email,
+        role: shop.role,
+        google_location_id: shop.google_location_id,
+        google_drive_folder_id: shop.google_drive_folder_id,
+        post_active: shop.post_active,
+      }
+    });
+  } catch (error: any) {
+    console.error('❌ Login error:', error);
+    return res.status(500).json({ error: 'サーバー内でエラーが発生しました。' });
+  }
+});
+
+// Helper to safely extract shopId from simulated Persistent token
+function getShopIdFromToken(authHeader: string | undefined): string | null {
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return null;
+  }
+  const token = authHeader.split(' ')[1];
+  if (token.startsWith('simulated_token_')) {
+    const parts = token.split('_');
+    if (parts.length < 3 || parts[0] !== 'simulated' || parts[1] !== 'token') {
+      return null;
+    }
+    return parts.slice(2, -1).join('_');
+  }
+  return null;
+}
+
+// GET /api/auth/me (Get profile from session token)
+app.get('/api/auth/me', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  const shopId = getShopIdFromToken(authHeader);
+
+  if (!shopId) {
+    return res.status(401).json({ error: '認証トークンが無効または見つかりません。' });
+  }
+
+  try {
+    const shop = await prisma.shop.findUnique({
+      where: { id: shopId },
+    });
+
+    if (!shop) {
+      return res.status(404).json({ error: '店舗が見つかりませんでした。' });
+    }
+
+    return res.json({
+      shop: {
+        id: shop.id,
+        name: shop.name,
+        email: shop.email,
+        role: shop.role,
+        google_location_id: shop.google_location_id,
+        google_drive_folder_id: shop.google_drive_folder_id,
+        post_active: shop.post_active,
+      }
+    });
+  } catch (error) {
+    console.error('❌ Auth validation error:', error);
+    return res.status(500).json({ error: 'サーバー内でエラーが発生しました。' });
+  }
+});
+
+// GET /api/shops (Get list of all stores - Master / Admin / Agency access)
+app.get('/api/shops', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  const callerShopId = getShopIdFromToken(authHeader);
+
+  if (!callerShopId) {
+    return res.status(401).json({ error: '認証トークンが無効または見つかりません。' });
+  }
+
+  try {
+    const caller = await prisma.shop.findUnique({
+      where: { id: callerShopId }
+    });
+
+    if (!caller) {
+      return res.status(403).json({ error: '呼び出し元のアカウントが見つかりません。' });
+    }
+
+    if (caller.role === 'ADMIN') {
+      const shops = await prisma.shop.findMany({
+        where: { role: 'OWNER' },
+        orderBy: { name: 'asc' }
+      });
+      const agencies = await prisma.shop.findMany({
+        where: { role: 'AGENCY' },
+        orderBy: { name: 'asc' }
+      });
+      return res.json({ shops, agencies });
+    } else if (caller.role === 'AGENCY') {
+      const agencyName = caller.agency_name || caller.name;
+      const shops = await prisma.shop.findMany({
+        where: {
+          role: 'OWNER',
+          agency_name: agencyName
+        },
+        orderBy: { name: 'asc' }
+      });
+      return res.json({ shops, agencies: [] });
+    } else {
+      return res.status(403).json({ error: '店舗一覧を閲覧する権限がありません。' });
+    }
+  } catch (error) {
+    console.error('❌ Failed to fetch shops list:', error);
+    return res.status(500).json({ error: '店舗一覧の取得に失敗しました。' });
+  }
+});
+
+// ==========================================
+// 📊 Dashboard & Settings Endpoints
+// ==========================================
+
+interface DriveFileItem {
+  id: string;
+  name: string;
+  folderName?: string;
+  folderId?: string;
+  mimeType?: string;
+  size?: string;
+  createdTime?: string;
+}
+
+// Fetch all images from root folder AND all subfolders with folder metadata
+async function fetchDriveFilesWithSubfolders(auth: any, rawFolderId: string): Promise<DriveFileItem[]> {
+  const rootFolderId = extractGoogleDriveFolderId(rawFolderId);
+  if (!auth || !rootFolderId || rootFolderId === 'root') {
+    return [];
+  }
+
+  try {
+    const drive = google.drive({ version: 'v3', auth });
+
+    let subfolders: any[] = [];
+    const folderMap = new Map<string, string>();
+    try {
+      const subfolderRes = await drive.files.list({
+        q: `'${rootFolderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+        fields: 'files(id, name)',
+        pageSize: 100,
+      });
+      subfolders = subfolderRes.data.files || [];
+      subfolders.forEach((f: any) => {
+        if (f.id && f.name) {
+          folderMap.set(f.id, f.name.trim());
+        }
+      });
+    } catch (subfolderErr: any) {
+      console.warn('⚠️ Could not fetch subfolders from Drive, will only scan root folder:', subfolderErr.message || subfolderErr);
+    }
+
+    const parentIds = [rootFolderId, ...Array.from(folderMap.keys())];
+    const parentQuery = parentIds.map(id => `'${id}' in parents`).join(' or ');
+
+    const imageRes = await drive.files.list({
+      q: `(${parentQuery}) and (mimeType = 'image/jpeg' or mimeType = 'image/png' or mimeType = 'image/jpg') and trashed = false`,
+      fields: 'files(id, name, mimeType, size, createdTime, parents)',
+      pageSize: 1000,
+    });
+
+    const files = imageRes.data.files || [];
+    const result: DriveFileItem[] = files.map((file: any) => {
+      let folderName: string | undefined = undefined;
+      let folderId: string | undefined = undefined;
+      if (file.parents && file.parents.length > 0) {
+        for (const p of file.parents) {
+          if (folderMap.has(p)) {
+            folderName = folderMap.get(p);
+            folderId = p;
+            break;
+          }
+        }
+      }
+      const sizeBytes = parseInt(file.size || '0', 10);
+      const sizeMB = sizeBytes > 0 ? `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB` : '不明';
+
+      return {
+        id: file.id || '',
+        name: file.name || '無題の写真',
+        folderName,
+        folderId,
+        mimeType: file.mimeType || 'image/jpeg',
+        size: sizeMB,
+        createdTime: file.createdTime || new Date().toISOString(),
+      };
+    });
+
+    return result;
+  } catch (err: any) {
+    console.error('⚠️ Failed to fetch Drive files with subfolders:', err.message || err);
+    return [];
+  }
+}
+
+interface GbpLocationDetails {
+  title?: string;
+  categoryName?: string;
+  locality?: string;
+  administrativeArea?: string;
+  fullAddress?: string;
+  phone?: string;
+  websiteUri?: string;
+}
+
+// Fetch GBP metadata (category, address, phone, website)
+async function fetchGbpLocationDetails(oauth2Client: any, locationIdInput: string): Promise<GbpLocationDetails | null> {
+  if (!oauth2Client || !locationIdInput) return null;
+  const numericalId = locationIdInput.match(/\d+/)?.[0];
+  if (!numericalId) return null;
+
+  try {
+    const mybusiness = google.mybusinessaccountmanagement({
+      version: 'v1',
+      auth: oauth2Client
+    });
+    const accountsRes = await mybusiness.accounts.list();
+    const accounts = accountsRes.data.accounts || [];
+    
+    for (const account of accounts) {
+      if (account.name) {
+        const fullLocationPath = `${account.name}/locations/${numericalId}`;
+        try {
+          const locRes = await oauth2Client.request({
+            url: `https://mybusiness.googleapis.com/v4/${fullLocationPath}`,
+            method: 'GET'
+          });
+          const locData = locRes.data as any;
+          if (locData) {
+            const addr = locData.address || {};
+            const city = addr.locality || addr.sublocality || '';
+            const pref = addr.administrativeArea || '';
+            const addressLines = (addr.addressLines || []).join(' ');
+            const fullAddr = [pref, city, addressLines].filter(Boolean).join(' ');
+            
+            return {
+              title: locData.locationName || locData.title,
+              categoryName: locData.primaryCategory?.displayName || locData.primaryCategory?.categoryName || '',
+              locality: city || pref,
+              administrativeArea: pref,
+              fullAddress: fullAddr,
+              phone: locData.primaryPhone,
+              websiteUri: locData.websiteUrl
+            };
+          }
+        } catch (v4Err: any) {
+          // Continue to next account
+        }
+      }
+    }
+  } catch (err: any) {
+    console.warn('⚠️ Could not fetch GBP location details:', err.message || err);
+  }
+  return null;
+}
+
+// Automatically initialize default ShopKeywords & settings from GBP info or store name
+async function initializeShopKeywords(shop: any, driveFilesList: DriveFileItem[] = []) {
+  if (shop.keywords) {
+    return shop.keywords;
+  }
+
+  console.log(`✨ Initializing default ShopKeywords and settings for shop: "${shop.name}"`);
+
+  let gbpDetails: GbpLocationDetails | null = null;
+  const auth = getGoogleAuthClient();
+  const locationIdInput = shop.google_location_id;
+
+  if (auth && locationIdInput) {
+    try {
+      gbpDetails = await fetchGbpLocationDetails(auth, locationIdInput);
+    } catch (e) {
+      console.warn('⚠️ Failed to fetch GBP metadata for initial keywords:', e);
+    }
+  }
+
+  const storeTitle = gbpDetails?.title || shop.name || '店舗';
+  const category = gbpDetails?.categoryName || '店舗';
+  const locality = gbpDetails?.locality || '';
+
+  // 1. Build tailored main keywords
+  const mainKws: string[] = [];
+  if (locality && category && category !== '店舗') {
+    mainKws.push(`${locality} ${category}`);
+  }
+  mainKws.push(storeTitle);
+  if (category && category !== '店舗') {
+    mainKws.push(`${category} おすすめ`);
+  }
+  if (locality && storeTitle) {
+    mainKws.push(`${locality} ${storeTitle}`);
+  }
+  if (mainKws.length < 3) {
+    mainKws.push('最新情報', 'おすすめメニュー');
+  }
+
+  // 2. Build tailored sub keywords
+  const subKws: string[] = [
+    category !== '店舗' ? `${category} メニュー` : 'こだわりメニュー',
+    '季節のおすすめ',
+    '人気サービス',
+    'ご予約受付中',
+    'お客様の声',
+    'アクセス・店舗情報',
+  ];
+
+  // 3. Build fixed footer
+  const footerLines = ['━━━━━━━━━━━━━━━━', storeTitle];
+  if (gbpDetails?.fullAddress) {
+    footerLines.push(`📍 住所: ${gbpDetails.fullAddress}`);
+  }
+  if (gbpDetails?.phone) {
+    footerLines.push(`📞 電話番号: ${gbpDetails.phone}`);
+  }
+  if (gbpDetails?.websiteUri) {
+    footerLines.push(`🌐 公式HP: ${gbpDetails.websiteUri}`);
+  }
+  footerLines.push('ご来店・お問い合わせを心よりお待ちしております。', '━━━━━━━━━━━━━━━━');
+  const fixedFooter = footerLines.join('\n');
+
+  // 4. Custom prompt
+  const locationPrefix = locality ? `${locality}の` : '';
+  const categoryLabel = category && category !== '店舗' ? `${category}` : '店舗';
+  const customPrompt = `親しみやすく誠実なトーンで。${locationPrefix}${categoryLabel}「${storeTitle}」の魅力やこだわり、専門的な強みについて、お客様にとって有益で分かりやすい内容で発信してください。`;
+
+  // 5. Generate 3 initial AI drafts
+  let draftPostsArr = [];
+  try {
+    const dummyShop = {
+      ...shop,
+      keywords: {
+        main_keywords: JSON.stringify(mainKws),
+        sub_keywords: JSON.stringify(subKws),
+        fixed_footer: fixedFooter,
+        custom_prompt: customPrompt,
+      }
+    };
+    const day0 = await generateSingleDraft(dummyShop, 0, driveFilesList);
+    const day1 = await generateSingleDraft(dummyShop, 1, driveFilesList);
+    const day2 = await generateSingleDraft(dummyShop, 2, driveFilesList);
+    draftPostsArr = [
+      { dayIndex: 0, title: '今日投稿予定の下書き (Day 0)', text: day0.text, subKeywords: day0.subKeywords, imageFileId: day0.imageFileId || null },
+      { dayIndex: 1, title: '明日投稿予定の下書き (Day 1)', text: day1.text, subKeywords: day1.subKeywords, imageFileId: day1.imageFileId || null },
+      { dayIndex: 2, title: '明後日投稿予定の下書き (Day 2)', text: day2.text, subKeywords: day2.subKeywords, imageFileId: day2.imageFileId || null },
+    ];
+  } catch (genErr) {
+    console.warn('⚠️ Initial draft generation during setup failed, using placeholder drafts:', genErr);
+    draftPostsArr = [
+      { dayIndex: 0, title: '今日投稿予定の下書き (Day 0)', text: `${storeTitle}の本日のおしらせ下書きです。`, subKeywords: [] },
+      { dayIndex: 1, title: '明日投稿予定の下書き (Day 1)', text: `${storeTitle}の明日のおしらせ下書きです。`, subKeywords: [] },
+      { dayIndex: 2, title: '明後日投稿予定の下書き (Day 2)', text: `${storeTitle}の明後日のおしらせ下書きです。`, subKeywords: [] },
+    ];
+  }
+
+  const createdKeywords = await prisma.shopKeywords.upsert({
+    where: { shop_id: shop.id },
+    update: {},
+    create: {
+      shop_id: shop.id,
+      main_keywords: JSON.stringify(mainKws),
+      sub_keywords: JSON.stringify(subKws),
+      fixed_footer: fixedFooter,
+      custom_prompt: customPrompt,
+      hp_url: gbpDetails?.websiteUri || null,
+      draft_posts: JSON.stringify(draftPostsArr),
+      post_time_hour: 9,
+    }
+  });
+
+  return createdKeywords;
+}
+
+// GET /api/shops/:shopId/dashboard
+app.get('/api/shops/:shopId/dashboard', async (req, res) => {
+  const { shopId } = req.params;
+
+  try {
+    const shop = await prisma.shop.findUnique({
+      where: { id: shopId },
+      include: {
+        keywords: true,
+      }
+    });
+
+    if (!shop) {
+      return res.status(404).json({ error: '店舗が見つかりませんでした。' });
+    }
+
+    // Determine photo stock count
+    let imageCount = mockDriveFiles.length;
+    let firstFileId = mockDriveFiles.length > 0 ? mockDriveFiles[0].id : null;
+    let driveFilesList: DriveFileItem[] = mockDriveFiles;
+
+    const auth = getGoogleAuthClient();
+    if (auth && shop.google_drive_folder_id) {
+      try {
+        const liveFiles = await fetchDriveFilesWithSubfolders(auth, shop.google_drive_folder_id);
+        if (liveFiles.length > 0) {
+          imageCount = liveFiles.length;
+          driveFilesList = liveFiles;
+          firstFileId = liveFiles[0].id || null;
+        } else {
+          imageCount = 0;
+          driveFilesList = [];
+          firstFileId = null;
+        }
+      } catch (e) {
+        console.log('⚠️ Failed to fetch live Drive images for dashboard, using fallback count.');
+      }
+    }
+
+    // Determine Posting Mode
+    let postingMode = 'TEXT_ONLY';
+    let postingModeLabel = '画像ストック0枚: テキストのみ投稿モード';
+    if (imageCount >= 10) {
+      postingMode = 'ALWAYS_IMAGE';
+      postingModeLabel = '画像ストック10枚以上: 画像連続投稿モード';
+    } else if (imageCount >= 1) {
+      postingMode = 'ALTERNATING';
+      postingModeLabel = `画像ストック${imageCount}枚（1〜9枚）: 交互投稿モード (画像とテキストを日替わり)`;
+    }
+
+    // Auto-initialize ShopKeywords if missing
+    if (!shop.keywords) {
+      shop.keywords = await initializeShopKeywords(shop, driveFilesList);
+    }
+
+    // Determine 3-day drafts
+    let draftPostsArr = [];
+    if (shop.keywords) {
+      if (shop.keywords.draft_posts) {
+        try {
+          draftPostsArr = JSON.parse(shop.keywords.draft_posts);
+        } catch (pErr) {
+          console.error('❌ Failed to parse draft_posts JSON:', pErr);
+        }
+      }
+      
+      // Auto-clean old dayIndex === -1 if calendar day in JST has changed
+      const publishedItem = draftPostsArr.find((d: any) => d.dayIndex === -1);
+      if (publishedItem) {
+        try {
+          if (!publishedItem.publishedAt) {
+            draftPostsArr = draftPostsArr.filter((d: any) => d.dayIndex !== -1);
+            await prisma.shopKeywords.update({
+              where: { shop_id: shopId },
+              data: { draft_posts: JSON.stringify(draftPostsArr) }
+            });
+          } else {
+            const formatter = new Intl.DateTimeFormat('ja-JP', {
+              timeZone: 'Asia/Tokyo',
+              year: 'numeric',
+              month: '2-digit',
+              day: '2-digit'
+            });
+            const todayDateStr = formatter.format(new Date());
+            const pubDateStr = formatter.format(new Date(publishedItem.publishedAt));
+
+            if (todayDateStr !== pubDateStr) {
+              console.log(`🧹 Calendar day changed in JST! Removing previous day's posted draft (-1).`);
+              draftPostsArr = draftPostsArr.filter((d: any) => d.dayIndex !== -1);
+              
+              await prisma.shopKeywords.update({
+                where: { shop_id: shopId },
+                data: { draft_posts: JSON.stringify(draftPostsArr) }
+              });
+            }
+          }
+        } catch (cleanErr: any) {
+          console.error('⚠️ Failed to clean up previous day posted draft:', cleanErr.message || cleanErr);
+        }
+      }
+      
+      // If empty, auto-generate 3-day drafts using Gemini AI
+      if (draftPostsArr.length === 0) {
+        try {
+          const day0 = await generateSingleDraft(shop, 0, driveFilesList);
+          const day1 = await generateSingleDraft(shop, 1, driveFilesList);
+          const day2 = await generateSingleDraft(shop, 2, driveFilesList);
+
+          draftPostsArr = [
+            { dayIndex: 0, title: '今日投稿予定の下書き (Day 0)', text: day0.text, subKeywords: day0.subKeywords, imageFileId: day0.imageFileId || null },
+            { dayIndex: 1, title: '明日投稿予定の下書き (Day 1)', text: day1.text, subKeywords: day1.subKeywords, imageFileId: day1.imageFileId || null },
+            { dayIndex: 2, title: '明後日投稿予定の下書き (Day 2)', text: day2.text, subKeywords: day2.subKeywords, imageFileId: day2.imageFileId || null },
+          ];
+
+          await prisma.shopKeywords.update({
+            where: { shop_id: shopId },
+            data: { draft_posts: JSON.stringify(draftPostsArr) },
+          });
+        } catch (genError) {
+          console.error('❌ Failed to first-time generate drafts:', genError);
+          draftPostsArr = [
+            { dayIndex: 0, title: '今日投稿予定の下書き (Day 0)', text: `${shop.name}の本日のおしらせ下書きです。`, subKeywords: [] },
+            { dayIndex: 1, title: '明日投稿予定の下書き (Day 1)', text: `${shop.name}の明日のおしらせ下書きです。`, subKeywords: [] },
+            { dayIndex: 2, title: '明後日投稿予定の下書き (Day 2)', text: `${shop.name}の明後日のおしらせ下書きです。`, subKeywords: [] },
+          ];
+        }
+      }
+    }
+
+    const resolvedDrafts = draftPostsArr.map((d: any) => ({
+      ...d,
+      imageFileId: d.imageFileId || null
+    }));
+
+    const day0Draft = resolvedDrafts.find((d: any) => d.dayIndex === 0);
+    const day0ImageFileId = day0Draft ? day0Draft.imageFileId : null;
+
+    const previewImage = day0ImageFileId
+      ? `/api/shops/${shopId}/drive-images/${day0ImageFileId}/view`
+      : (firstFileId ? `/api/shops/${shopId}/drive-images/${firstFileId}/view` : null);
+
+    return res.json({
+      shopName: shop.name,
+      postActive: shop.post_active,
+      imageCount,
+      postingMode,
+      postingModeLabel,
+      nextPostTime: `本日 ${(shop.keywords as any)?.post_time_hour ?? 9}:00 予定`,
+      previewImage,
+      googleLocationId: shop.google_location_id,
+      gbpActionUrl: shop.keywords?.gbp_action_url || null,
+      draftPosts: resolvedDrafts,
+    });
+  } catch (error) {
+    console.error('❌ Dashboard fetch error:', error);
+    return res.status(500).json({ error: 'ダッシュボードの取得に失敗しました。' });
+  }
+});
+
+// POST /api/shops/:shopId/toggle-post
+app.post('/api/shops/:shopId/toggle-post', async (req, res) => {
+  const { shopId } = req.params;
+  const { active } = req.body;
+
+  try {
+    const updated = await prisma.shop.update({
+      where: { id: shopId },
+      data: { post_active: active },
+    });
+
+    return res.json({ success: true, postActive: updated.post_active });
+  } catch (error) {
+    console.error('❌ Toggle post error:', error);
+    return res.status(500).json({ error: '自動投稿の切り替えに失敗しました。' });
+  }
+});
+
+// GET /api/shops/:shopId/settings
+app.get('/api/shops/:shopId/settings', async (req, res) => {
+  const { shopId } = req.params;
+
+  try {
+    const shop = await prisma.shop.findUnique({
+      where: { id: shopId },
+      include: {
+        keywords: true,
+      }
+    });
+
+    if (!shop) {
+      return res.status(404).json({ error: '店舗が見つかりませんでした。' });
+    }
+
+    if (!shop.keywords) {
+      shop.keywords = await initializeShopKeywords(shop);
+    }
+
+    const mainKeywords = shop.keywords ? JSON.parse(shop.keywords.main_keywords) : [];
+    const subKeywords = shop.keywords ? JSON.parse(shop.keywords.sub_keywords) : [];
+
+    return res.json({
+      shopId: shop.id,
+      shopName: shop.name,
+      postActive: shop.post_active,
+      keywords: {
+        mainKeywords,
+        subKeywords,
+        fixedFooter: shop.keywords?.fixed_footer || '',
+        customPrompt: shop.keywords?.custom_prompt || '',
+        hpUrl: shop.keywords?.hp_url || '',
+        tabelogUrl: shop.keywords?.tabelog_url || '',
+        hotpepperUrl: shop.keywords?.hotpepper_url || '',
+        gurunaviUrl: shop.keywords?.gurunavi_url || '',
+        gbpActionUrl: shop.keywords?.gbp_action_url || '',
+        postTimeHour: (shop.keywords as any)?.post_time_hour ?? 9,
+      }
+    });
+  } catch (error) {
+    console.error('❌ Settings fetch error:', error);
+    return res.status(500).json({ error: '設定情報の取得に失敗しました。' });
+  }
+});
+
+// POST /api/shops/:shopId/settings
+app.post('/api/shops/:shopId/settings', async (req, res) => {
+  const { shopId } = req.params;
+  const { postActive, keywords, googleLocationId } = req.body;
+
+  try {
+    const updateData: any = {
+      post_active: typeof postActive === 'boolean' ? postActive : true,
+    };
+    if (googleLocationId !== undefined) {
+      updateData.google_location_id = googleLocationId
+        ? (googleLocationId.startsWith('locations/') ? googleLocationId : `locations/${googleLocationId}`)
+        : null;
+    }
+
+    await prisma.shop.update({
+      where: { id: shopId },
+      data: updateData
+    });
+
+    if (keywords) {
+      const mainKeywordsStr = JSON.stringify(keywords.mainKeywords || []);
+      const subKeywordsStr = JSON.stringify(keywords.subKeywords || []);
+
+      await prisma.shopKeywords.upsert({
+        where: { shop_id: shopId },
+        update: {
+          main_keywords: mainKeywordsStr,
+          sub_keywords: subKeywordsStr,
+          fixed_footer: keywords.fixedFooter,
+          custom_prompt: keywords.customPrompt,
+          hp_url: keywords.hpUrl,
+          tabelog_url: keywords.tabelogUrl,
+          hotpepper_url: keywords.hotpepperUrl,
+          gurunavi_url: keywords.gurunaviUrl,
+          gbp_action_url: keywords.gbpActionUrl,
+          post_time_hour: typeof keywords.postTimeHour === 'number' ? keywords.postTimeHour : 9,
+        },
+        create: {
+          shop_id: shopId,
+          main_keywords: mainKeywordsStr,
+          sub_keywords: subKeywordsStr,
+          fixed_footer: keywords.fixedFooter,
+          custom_prompt: keywords.customPrompt,
+          hp_url: keywords.hpUrl,
+          tabelog_url: keywords.tabelogUrl,
+          hotpepper_url: keywords.hotpepperUrl,
+          gurunavi_url: keywords.gurunaviUrl,
+          gbp_action_url: keywords.gbpActionUrl,
+          post_time_hour: typeof keywords.postTimeHour === 'number' ? keywords.postTimeHour : 9,
+        }
+      });
+    }
+
+    return res.json({ success: true, message: '設定を正常に保存しました。' });
+  } catch (error) {
+    console.error('❌ Settings save error:', error);
+    return res.status(500).json({ error: '設定の保存に失敗しました。' });
+  }
+});
+
+// ==========================================
+// 📁 Google Drive API Endpoints
+// ==========================================
+
+// GET /api/shops/:shopId/drive-images
+app.get('/api/shops/:shopId/drive-images', async (req, res) => {
+  const { shopId } = req.params;
+
+  let shop = null;
+  let auth = null;
+  try {
+    shop = await prisma.shop.findUnique({ where: { id: shopId } });
+    auth = getGoogleAuthClient();
+
+    if (!shop) {
+      return res.status(404).json({ error: '店舗が見つかりませんでした。' });
+    }
+
+    if (!auth) {
+      return res.json({ files: mockDriveFiles, isMock: true });
+    }
+
+    const folderId = extractGoogleDriveFolderId(shop.google_drive_folder_id);
+    const files = await fetchDriveFilesWithSubfolders(auth, folderId);
+
+    return res.json({ files, isMock: false });
+  } catch (error: any) {
+    console.error('❌ Failed to fetch Google Drive files:', error.message || error);
+    return res.json({ files: mockDriveFiles, isMock: true, error: 'Google Drive接続エラーのため、モック画像を表示しています。' });
+  }
+});
+
+// GET /api/shops/:shopId/drive-images/:fileId/view
+app.get('/api/shops/:shopId/drive-images/:fileId/view', async (req, res) => {
+  const { fileId } = req.params;
+
+  try {
+    if (fileId.startsWith('mock-img-')) {
+      const mockFile = mockDriveFiles.find(f => f.id === fileId);
+      if (mockFile && mockFile.dataUrl) {
+        const base64Content = mockFile.dataUrl.split(',')[1];
+        const buffer = Buffer.from(base64Content, 'base64');
+        res.setHeader('Content-Type', mockFile.mimeType);
+        res.setHeader('Cache-Control', 'public, max-age=86400');
+        return res.send(buffer);
+      }
+      return res.redirect('https://images.unsplash.com/photo-1497366216548-37526070297c?auto=format&fit=crop&q=80&w=600');
+    }
+
+    const auth = getGoogleAuthClient();
+    if (!auth) {
+      return res.redirect('https://images.unsplash.com/photo-1497366216548-37526070297c?auto=format&fit=crop&q=80&w=600');
+    }
+
+    const drive = google.drive({ version: 'v3', auth });
+    const metadata = await drive.files.get({
+      fileId,
+      fields: 'mimeType',
+    });
+
+    res.setHeader('Content-Type', metadata.data.mimeType || 'image/jpeg');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+
+    const fileRes = await drive.files.get({
+      fileId,
+      alt: 'media',
+    }, { responseType: 'stream' });
+
+    fileRes.data.pipe(res);
+  } catch (error: any) {
+    console.error(`❌ Failed to stream Google Drive image ${fileId}:`, error.message || error);
+    return res.redirect('https://images.unsplash.com/photo-1497366216548-37526070297c?auto=format&fit=crop&q=80&w=600');
+  }
+});
+
+// GET /api/shops/:shopId/drive-folders
+app.get('/api/shops/:shopId/drive-folders', async (req, res) => {
+  const { shopId } = req.params;
+
+  try {
+    const shop = await prisma.shop.findUnique({ where: { id: shopId } });
+    const auth = getGoogleAuthClient();
+
+    if (!shop) {
+      return res.status(404).json({ error: '店舗が見つかりませんでした。' });
+    }
+
+    const folderId = extractGoogleDriveFolderId(shop.google_drive_folder_id);
+    if (!auth || !folderId || folderId === 'root') {
+      return res.json({ folders: [] });
+    }
+
+    const drive = google.drive({ version: 'v3', auth });
+    const subfolderRes = await drive.files.list({
+      q: `'${folderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+      fields: 'files(id, name)',
+      pageSize: 100,
+    });
+
+    const folders = (subfolderRes.data.files || []).map((f: any) => ({
+      id: f.id || '',
+      name: f.name ? f.name.trim() : '無題のフォルダ',
+    }));
+
+    return res.json({ folders });
+  } catch (error: any) {
+    console.error('❌ Failed to fetch Drive folders:', error.message || error);
+    return res.json({ folders: [] });
+  }
+});
+
+// POST /api/shops/:shopId/drive-images/upload
+app.post('/api/shops/:shopId/drive-images/upload', async (req, res) => {
+  const { shopId } = req.params;
+  const { fileName, mimeType, base64Data, targetFolderId, newFolderName } = req.body;
+
+  if (!fileName || !mimeType || !base64Data) {
+    return res.status(400).json({ error: '画像アップロードに必要なデータが不足しています。' });
+  }
+
+  let shop = null;
+  let auth = null;
+  try {
+    shop = await prisma.shop.findUnique({ where: { id: shopId } });
+    auth = getGoogleAuthClient();
+
+    if (!shop) {
+      return res.status(404).json({ error: '店舗が見つかりませんでした。' });
+    }
+
+    const fileBuffer = Buffer.from(base64Data, 'base64');
+    const lowerMime = mimeType.toLowerCase();
+    const lowerName = fileName.toLowerCase();
+    const isJpg = lowerMime === 'image/jpeg' || lowerMime === 'image/jpg' || lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg');
+    const isPng = lowerMime === 'image/png' || lowerName.endsWith('.png');
+
+    if (!isJpg && !isPng) {
+      return res.status(400).json({
+        error: 'Googleマイビジネスの仕様上、MEO投稿に利用できる画像は JPEG (.jpg/.jpeg) または PNG (.png) 形式のみです。'
+      });
+    }
+
+    const maxBytes = 5 * 1024 * 1024;
+    if (fileBuffer.length > maxBytes) {
+      return res.status(400).json({
+        error: 'Googleマイビジネスの仕様上、アップロードできる画像の最大サイズは 5 MB です。'
+      });
+    }
+
+    if (!auth) {
+      const dataUrl = `data:${mimeType};base64,${base64Data}`;
+      const newMockFile: MockFile = {
+        id: `mock-img-${Date.now()}`,
+        name: fileName,
+        mimeType: mimeType,
+        size: `${(fileBuffer.length / (1024 * 1024)).toFixed(1)} MB`,
+        createdTime: new Date().toISOString(),
+        dataUrl,
+      };
+      mockDriveFiles.unshift(newMockFile);
+      return res.json({ success: true, file: newMockFile, isMock: true });
+    }
+
+    const drive = google.drive({ version: 'v3', auth });
+    let destinationFolderId = extractGoogleDriveFolderId(shop.google_drive_folder_id) || 'root';
+    let targetFolderName: string | undefined = undefined;
+
+    if (newFolderName && newFolderName.trim()) {
+      try {
+        const folderCreateRes = await drive.files.create({
+          requestBody: {
+            name: newFolderName.trim(),
+            mimeType: 'application/vnd.google-apps.folder',
+            parents: [destinationFolderId],
+          },
+          fields: 'id, name',
+        });
+        if (folderCreateRes.data.id) {
+          destinationFolderId = folderCreateRes.data.id;
+          targetFolderName = folderCreateRes.data.name?.trim();
+        }
+      } catch (fErr: any) {
+        console.warn('⚠️ Failed to create new subfolder in Drive:', fErr.message || fErr);
+      }
+    } else if (targetFolderId && targetFolderId !== 'root') {
+      destinationFolderId = targetFolderId;
+      try {
+        const fMeta = await drive.files.get({ fileId: targetFolderId, fields: 'name' });
+        targetFolderName = fMeta.data.name?.trim();
+      } catch (e) {}
+    }
+
+    const bufferStream = new stream.PassThrough();
+    bufferStream.end(fileBuffer);
+
+    const uploadRes = await drive.files.create({
+      requestBody: {
+        name: fileName,
+        parents: [destinationFolderId],
+        mimeType: mimeType,
+      },
+      media: {
+        mimeType: mimeType,
+        body: bufferStream,
+      },
+      fields: 'id, name, mimeType, size, createdTime',
+    });
+
+    const file = uploadRes.data;
+    const sizeBytes = parseInt(file.size || '0', 10);
+    const sizeMB = sizeBytes > 0 ? `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB` : '不明';
+
+    return res.json({
+      success: true,
+      isMock: false,
+      file: {
+        id: file.id,
+        name: file.name,
+        folderName: targetFolderName,
+        folderId: destinationFolderId,
+        mimeType: file.mimeType,
+        size: sizeMB,
+        createdTime: file.createdTime,
+      }
+    });
+  } catch (error: any) {
+    console.error('❌ Image upload error:', error.message || error);
+    return res.status(500).json({ error: '画像のアップロードに失敗しました。' });
+  }
+});
+
+// DELETE /api/shops/:shopId/drive-images/:fileId
+app.delete('/api/shops/:shopId/drive-images/:fileId', async (req, res) => {
+  const { shopId, fileId } = req.params;
+
+  try {
+    const shop = await prisma.shop.findUnique({ where: { id: shopId } });
+    const auth = getGoogleAuthClient();
+
+    if (!shop) {
+      return res.status(404).json({ error: '店舗が見つかりませんでした。' });
+    }
+
+    if (!auth || fileId.startsWith('mock-')) {
+      mockDriveFiles = mockDriveFiles.filter((f) => f.id !== fileId);
+      return res.json({ success: true, fileId, isMock: true });
+    }
+
+    const drive = google.drive({ version: 'v3', auth });
+    await drive.files.delete({ fileId });
+
+    return res.json({ success: true, fileId, isMock: false });
+  } catch (error: any) {
+    console.error('❌ Image deletion error:', error.message || error);
+    return res.status(500).json({ error: 'Google Driveからの画像削除に失敗しました。' });
+  }
+});
+
+// ==========================================
+// 🤖 Gemini AI Draft Generation
+// ==========================================
+
+export async function generateSingleDraft(
+  shop: any,
+  dayIndex: number,
+  driveFiles?: DriveFileItem[],
+  forceTextOnly: boolean = false
+): Promise<{ text: string, subKeywords: string[], imageFileId: string | null }> {
+  const mainKeywords: string[] = JSON.parse(shop.keywords?.main_keywords || '[]');
+  const subKeywords: string[] = JSON.parse(shop.keywords?.sub_keywords || '[]');
+  const customPrompt = shop.keywords?.custom_prompt || '';
+  const fixedFooter = shop.keywords?.fixed_footer || '';
+
+  let imageFileId: string | null = null;
+  const selectedSubKeywords: string[] = [];
+
+  const imageCount = driveFiles ? driveFiles.length : 0;
+  const isAlternating = imageCount >= 1 && imageCount < 10;
+  const shouldBeTextOnly = forceTextOnly || (isAlternating && dayIndex % 2 === 1);
+
+  // 1. Select daily randomized sub-keywords
+  if (subKeywords.length > 0) {
+    const shuffled = [...subKeywords].sort(() => 0.5 - Math.random());
+    const count = Math.floor(Math.random() * 2) + 2;
+    selectedSubKeywords.push(...shuffled.slice(0, Math.min(count, shuffled.length)));
+  }
+
+  // 2. Intelligent Image Selection with Subfolder Matching
+  if (driveFiles && driveFiles.length > 0 && !shouldBeTextOnly) {
+    const subfolderMatchedFiles: DriveFileItem[] = [];
+
+    if (selectedSubKeywords.length > 0) {
+      for (const file of driveFiles) {
+        if (file.folderName) {
+          const normalizedFolderName = file.folderName.trim().toLowerCase();
+          const isMatched = selectedSubKeywords.some((subKw: string) => {
+            const normalizedSubKw = subKw.trim().toLowerCase();
+            return normalizedFolderName === normalizedSubKw || normalizedFolderName.includes(normalizedSubKw) || normalizedSubKw.includes(normalizedFolderName);
+          });
+          if (isMatched) {
+            subfolderMatchedFiles.push(file);
+          }
+        }
+      }
+    }
+
+    if (subfolderMatchedFiles.length > 0) {
+      const randomIndex = Math.floor(Math.random() * subfolderMatchedFiles.length);
+      const selectedFile = subfolderMatchedFiles[randomIndex];
+      imageFileId = selectedFile.id || null;
+    } else {
+      const randomIndex = Math.floor(Math.random() * driveFiles.length);
+      const selectedFile = driveFiles[randomIndex];
+      imageFileId = selectedFile.id || null;
+    }
+  }
+
+  const geminiApiKey = process.env.GEMINI_API_KEY;
+  if (!geminiApiKey) {
+    throw new Error('Gemini APIキーが設定されていません。');
+  }
+
+  const genAI = new GoogleGenerativeAI(geminiApiKey);
+  const model = genAI.getGenerativeModel({ model: 'gemini-3.6-flash' });
+
+  const themes = [
+    {
+      name: "悩み解決型 (Trouble Resolution)",
+      focus: "ターゲット層特有の具体的かつ代表的なお悩み（例：集客、美容、サービス選び、各種不便など、その店舗が解決できるお悩みや課題）を切り口にし、どのようなアプローチでそれを根本からケア・解決・サポートしていくのかを詳しく語る構成。"
+    },
+    {
+      name: "サービス詳細紹介型 (Service / Menu Highlight)",
+      focus: "特定の提供サービス、おすすめのメニュー、または主力商品について、その特徴、得られる効果、なぜそれが必要・おすすめなのかを専門的な事実を交えて深く解説する構成。"
+    },
+    {
+      name: "利用シーン・シチュエーション型 (Situation & Context)",
+      focus: "「〇〇な時に利用したい」「忙しい合間にリフレッシュしたい」「特別な日に利用したい」といった、具体的で魅力的な利用・来店シチュエーションに焦点を当て、店舗の利便性や環境、通いやすさをアピールする構成。"
+    },
+    {
+      name: "よくある質問回答型 (FAQ / Q&A answering)",
+      focus: "お客様からよく受ける代表的な疑問や質問（例：料金や利用の流れ、効果、準備するものなど）に対する、具体的で分かりやすい解説を提示して不安を解消する構成。"
+    },
+    {
+      name: "選ばれる理由・こだわり提示型 (Unique Selling Proposition)",
+      focus: "他店との違い、店舗独自の強みやこだわり（例：丁寧なカウンセリング、専門知識、独自の技術・こだわり素材、アフターフォローなど）について客観的な事実に基づいて解説する構成。"
+    },
+    {
+      name: "特定ターゲット特化アピール型 (Target Audience Appeal)",
+      focus: "「特定の目的を持つ方」「特定のお悩みを持つお客様」など、ターゲットを具体的に絞り込み、その層が店舗を利用することで得られるメリットや価値を具体的に語る構成。"
+    }
+  ];
+
+  const selectedTheme = themes[dayIndex % themes.length];
+
+  const todayJp = new Date().toLocaleDateString('ja-JP', {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    weekday: 'long'
+  });
+
+  const prompt = `
+    あなたは店舗「${shop.name}」のオーナー代理として、Googleマップ（MEO）および生成AI検索（AIO/LLMO）向けに最適化された、日替わりの店舗投稿テキスト（おしらせ/最新情報）を自動作成してください。
+
+    【今回の投稿テーマ・検索意図】
+    - テーマ名: ${selectedTheme.name}
+    - 執筆のフォーカス: ${selectedTheme.focus}
+    ※必ずこのテーマの検索文脈・意図に完全に合致する内容で執筆してください。
+
+    【店舗基本情報】
+    - 店舗名: ${shop.name}
+    - 所在地住所情報（固定フッターより抜粋）: ${fixedFooter || '未設定'}
+    - ターゲット層へのアピール・トーンマナー: ${customPrompt || '親しみやすく誠実なトーン。'}
+    - 今日の日付: ${todayJp}
+
+    【作成の絶対ルール（厳守してください）】
+    1. 結論ファースト（PREP法）の徹底:
+       文章の冒頭（最初の一文、30〜50文字程度）で、時候の挨拶などを一切省き、「【主要キーワード/テーマ】店舗名＋エリア名＋主要サービス（結論）」を一発で言い切る形で書き出してください。
+       また、この結論を言い切った最初の一文の直後には、必ず【空行を1行】挟んでから、次の文章（最寄り駅や詳細なアクセス情報など）を書き始めてください。（冒頭が1つの重たい段落にまとまるのを物理的に防ぎます）
+
+    2. 主語・エリア・サービス名の明確化（5W1Hの網羅）:
+       主語を「当店」や「当院」などの曖昧な言葉にせず、必ず「${shop.name}」という具体的な店舗名で表記してください。また、エリア名（店舗の所在地・地域）を一文の中に自然に含めてください。エリア名については、必ず「所在地住所情報（固定フッター）」に記載されている住所情報のみから正しい地域名（市区町村名や駅名など）を抽出し、それを使用してください。フッターに住所情報がない場合、あるいは未設定の場合は、具体的な地域名は出力せず、所在地を特定しない汎用的な表現にしてください。メインキーワードやその他の情報から地域名を取得したり、存在しない架空の地域名を捏造することは絶対に禁止します。
+
+    3. メインキーワードの完全含有:
+       指定されたメインキーワード [ ${mainKeywords.join(', ')} ] を、文章全体の自然な文脈にそって【すべて必ず】本文中に含めてください。単なるキーワードの羅列や強引な詰め込みは厳禁です。
+
+    4. 本日のサブキーワード:
+       本日の日替わりサブキーワード [ ${selectedSubKeywords.join(', ')} ] を、文章の中に自然に盛り込んでください。
+
+    5. 曖昧な表現の排除と一次情報・数値の提示:
+       抽象的な形容詞や曖昧なアピールを徹底的に排除してください。代わりに、店舗が実際に提供している客観的・専門的な事実や具体的なアプローチ（一次情報、独自のこだわり、サービス工程、実績など）を具体的に記述してください。
+
+    6. 特徴・こだわりの箇条書き構造化（中盤）:
+       文章の中盤部分で、今回のテーマに関連する店舗のこだわり・特徴・サービス内容を、必ず【3つの箇条書き（「・」マークを使用）】で簡潔に整理してください。
+       箇条書きに入る直前の説明・移行文の直後には、必ず【空行を1行】挟んでから、箇条書きの1項目目を書き始めてください。LLMが最も要約・引用しやすい構造化テキストに仕上げてください。（マークダウンのアスタリスク「*」や「-」は崩れやすいため使用禁止です）
+       （箇条書き例：
+         ・〇〇：具体的かつ客観的な強みや内容を1文で。
+         ・〇〇：具体的かつ客観的な強みや内容を1文で。
+         ・〇〇：具体的かつ客観的な強みや内容を1文で。）
+
+    7. アクション喚起（CTA）の自然な配置（後半）:
+       文章の最後（箇条書きの後）の締めくくりのアクション喚起（CTA）として、必ず次の指定テキストを【一言一句違わずに固定の1文】としてそのまま出力してください。
+       指定テキスト：「『詳細』ボタン、またはプロフィールのウェブサイトリンクからお気軽にお問い合わせください。」
+       （※この指定テキスト以外の独自の行動喚起や売り込みの文章、連絡先などを追加することは【絶対に】禁止します）
+
+    8. 段落分けと空行の徹底（スマートフォン可読性の最適化）:
+       文章全体が視覚的に詰まって見苦しくなるのを防ぐため、一つの段落は必ず「1文〜最大2文程度（50文字〜100文字程度）」とし、各段落の間には【必ず空行を1行】挟んでください。
+
+    9. 文字数制限:
+       全体の本文は【500文字程度（改行を除く）】に収め、一般客が読んで親しみやすく自然な日本語で仕上げてください。
+
+    10. 署名・連絡先・記号マークダウンの排除:
+        本文の中には、ホームページURL、電話番号、アクションボタンの文言、住所、店舗名のフッター署名、および絵文字やマークダウン記号（**、#、*など）は【絶対に】含めないでください。純粋な文章テキストと「・」マーク、改行のみで出力してください。
+
+    返される内容は自動作成した完成本文のみとし、説明、挨拶、マークダウン装飾（\`\`\`など）は一切含めないでください。`;
+
+  let generatedText = '';
+  try {
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    generatedText = response.text().trim().replace(/```/g, '');
+  } catch (err: any) {
+    console.warn('⚠️ gemini-3.6-flash fallback to gemini-3.5-flash:', err.message || err);
+    try {
+      const fallbackModel = genAI.getGenerativeModel({ model: 'gemini-3.5-flash' });
+      const result = await fallbackModel.generateContent(prompt);
+      const response = await result.response;
+      generatedText = response.text().trim().replace(/```/g, '');
+    } catch (fallbackErr: any) {
+      console.error('❌ Both gemini-3.6-flash and gemini-3.5-flash failed:', fallbackErr.message || fallbackErr);
+      throw fallbackErr;
+    }
+  }
+
+  return {
+    text: generatedText,
+    subKeywords: selectedSubKeywords,
+    imageFileId,
+  };
+}
+
+// POST /api/shops/:shopId/draft-posts
+app.post('/api/shops/:shopId/draft-posts', async (req, res) => {
+  const { shopId } = req.params;
+  const { drafts } = req.body;
+
+  try {
+    await prisma.shopKeywords.update({
+      where: { shop_id: shopId },
+      data: {
+        draft_posts: JSON.stringify(drafts),
+      }
+    });
+
+    return res.json({ success: true, message: '下書きを保存しました。' });
+  } catch (error: any) {
+    console.error('❌ Draft posts save error:', error);
+    return res.status(500).json({ error: error.message || '下書きの保存に失敗しました。' });
+  }
+});
+
+// POST /api/shops/:shopId/draft-posts/regenerate
+app.post('/api/shops/:shopId/draft-posts/regenerate', async (req, res) => {
+  const { shopId } = req.params;
+  const { dayIndex, all } = req.body;
+
+  if (!all && typeof dayIndex === 'number' && dayIndex === -1) {
+    return res.status(400).json({ error: '投稿済みの下書きは再作成できません。' });
+  }
+
+  try {
+    const shop = await prisma.shop.findUnique({
+      where: { id: shopId },
+      include: { keywords: true }
+    });
+
+    if (!shop || !shop.keywords) {
+      return res.status(404).json({ error: '店舗情報、またはキーワード設定が見つかりませんでした。' });
+    }
+
+    let draftPostsArr = [];
+    if (shop.keywords.draft_posts) {
+      draftPostsArr = JSON.parse(shop.keywords.draft_posts);
+    }
+
+    let driveFilesList: DriveFileItem[] = [];
+    const auth = getGoogleAuthClient();
+    if (auth && shop.google_drive_folder_id) {
+      driveFilesList = await fetchDriveFilesWithSubfolders(auth, shop.google_drive_folder_id);
+    }
+
+    if (all) {
+      const day0 = await generateSingleDraft(shop, 0, driveFilesList);
+      const day1 = await generateSingleDraft(shop, 1, driveFilesList);
+      const day2 = await generateSingleDraft(shop, 2, driveFilesList);
+
+      const nextDrafts = [
+        { dayIndex: 0, title: '今日投稿予定の下書き (Day 0)', text: day0.text, subKeywords: day0.subKeywords, imageFileId: day0.imageFileId || null },
+        { dayIndex: 1, title: '明日投稿予定の下書き (Day 1)', text: day1.text, subKeywords: day1.subKeywords, imageFileId: day1.imageFileId || null },
+        { dayIndex: 2, title: '明後日投稿予定の下書き (Day 2)', text: day2.text, subKeywords: day2.subKeywords, imageFileId: day2.imageFileId || null },
+      ];
+
+      const publishedItem = draftPostsArr.find((d: any) => d.dayIndex === -1);
+      if (publishedItem) {
+        draftPostsArr = [publishedItem, ...nextDrafts];
+      } else {
+        draftPostsArr = nextDrafts;
+      }
+    } else {
+      const targetIndex = typeof dayIndex === 'number' ? dayIndex : 0;
+      const regenerated = await generateSingleDraft(shop, targetIndex, driveFilesList);
+
+      const defaultTitles = [
+        '今日投稿予定の下書き (Day 0)',
+        '明日投稿予定の下書き (Day 1)',
+        '明後日投稿予定の下書き (Day 2)'
+      ];
+
+      const existingIdx = draftPostsArr.findIndex((d: any) => d.dayIndex === targetIndex);
+      const draftObj = {
+        dayIndex: targetIndex,
+        title: defaultTitles[targetIndex] || `下書き (Day ${targetIndex})`,
+        text: regenerated.text,
+        subKeywords: regenerated.subKeywords,
+        imageFileId: regenerated.imageFileId || null,
+      };
+
+      if (existingIdx !== -1) {
+        draftPostsArr[existingIdx] = draftObj;
+      } else {
+        draftPostsArr.push(draftObj);
+      }
+    }
+
+    draftPostsArr.sort((a: any, b: any) => a.dayIndex - b.dayIndex);
+
+    await prisma.shopKeywords.update({
+      where: { shop_id: shopId },
+      data: {
+        draft_posts: JSON.stringify(draftPostsArr),
+      }
+    });
+
+    return res.json({ success: true, drafts: draftPostsArr });
+  } catch (error: any) {
+    console.error('❌ Draft regenerate error:', error);
+    return res.status(500).json({ error: error.message || 'AI下書きの再生成に失敗しました。' });
+  }
+});
+
+// POST /api/shops/:shopId/draft-posts/clear-published
+app.post('/api/shops/:shopId/draft-posts/clear-published', async (req, res) => {
+  const { shopId } = req.params;
+  try {
+    const shopKeywords = await prisma.shopKeywords.findUnique({
+      where: { shop_id: shopId }
+    });
+
+    if (shopKeywords && shopKeywords.draft_posts) {
+      let draftPostsArr = JSON.parse(shopKeywords.draft_posts);
+      draftPostsArr = draftPostsArr.filter((d: any) => d.dayIndex !== -1);
+
+      await prisma.shopKeywords.update({
+        where: { shop_id: shopId },
+        data: {
+          draft_posts: JSON.stringify(draftPostsArr)
+        }
+      });
+      return res.json({ success: true, drafts: draftPostsArr });
+    }
+    return res.json({ success: true, drafts: [] });
+  } catch (error: any) {
+    console.error('❌ Clear published drafts error:', error);
+    return res.status(500).json({ error: error.message || '投稿済み下書きの削除に失敗しました。' });
+  }
+});
+
+// Helper to dynamically resolve short/numeric GMB location ID into a full accounts/.../locations/... GMB path
+async function resolveGoogleLocationPath(oauth2Client: any, locationIdInput: string): Promise<string | null> {
+  if (!locationIdInput) return null;
+  
+  if (locationIdInput.startsWith('accounts/')) {
+    return locationIdInput;
+  }
+
+  const numMatch = locationIdInput.match(/\d+/);
+  if (!numMatch) return null;
+  const numericalId = numMatch[0];
+
+  try {
+    const mybusiness = google.mybusinessaccountmanagement({
+      version: 'v1',
+      auth: oauth2Client
+    });
+    const accountsRes = await mybusiness.accounts.list();
+    const accounts = accountsRes.data.accounts || [];
+    
+    for (const account of accounts) {
+      if (account.name) {
+        return `${account.name}/locations/${numericalId}`;
+      }
+    }
+  } catch (err: any) {
+    console.error('❌ Failed to resolve GMB location path prefix:', err.message || err);
+  }
+  return null;
+}
+
+// Helper to run daily post publication and draft sliding / generation
+async function executeDailyPostRollover(shopId: string) {
+  const shop = await prisma.shop.findUnique({
+    where: { id: shopId },
+    include: { keywords: true },
+  });
+
+  if (!shop) {
+    throw new Error('店舗が見つかりませんでした。');
+  }
+
+  let draftPostsArr = [];
+  if (shop.keywords && shop.keywords.draft_posts) {
+    try {
+      draftPostsArr = JSON.parse(shop.keywords.draft_posts);
+    } catch (err) {
+      console.error('❌ Failed to parse drafts:', err);
+    }
+  }
+
+  let cleanDrafts = draftPostsArr.filter((d: any) => d.dayIndex !== -1);
+
+  if (cleanDrafts.length === 0) {
+    console.log(`🤖 Auto-generating initial 3-day drafts for shop: ${shop.name}`);
+    let driveFilesList: any[] = [];
+    const auth = getGoogleAuthClient();
+    const driveFolderId = extractGoogleDriveFolderId(shop.google_drive_folder_id);
+    if (auth && driveFolderId !== 'root') {
+      try {
+        const drive = google.drive({ version: 'v3', auth });
+        const driveRes = await drive.files.list({
+          q: `parents in '${driveFolderId}' and (mimeType = 'image/jpeg' or mimeType = 'image/png' or mimeType = 'image/jpg') and trashed = false`,
+          fields: 'files(id, name)',
+          pageSize: 1000,
+        });
+        if (driveRes.data.files) {
+          driveFilesList = driveRes.data.files.map((f: any) => ({ id: f.id || '', name: f.name || '' }));
+        }
+      } catch (e) {}
+    }
+
+    try {
+      const day0 = await generateSingleDraft(shop, 0, driveFilesList);
+      const day1 = await generateSingleDraft(shop, 1, driveFilesList);
+      const day2 = await generateSingleDraft(shop, 2, driveFilesList);
+      cleanDrafts = [
+        { dayIndex: 0, title: '今日投稿予定の下書き (Day 0)', text: day0.text, subKeywords: day0.subKeywords, imageFileId: day0.imageFileId || null },
+        { dayIndex: 1, title: '明日投稿予定の下書き (Day 1)', text: day1.text, subKeywords: day1.subKeywords, imageFileId: day1.imageFileId || null },
+        { dayIndex: 2, title: '明後日投稿予定の下書き (Day 2)', text: day2.text, subKeywords: day2.subKeywords, imageFileId: day2.imageFileId || null }
+      ];
+    } catch (genErr) {
+      console.error('❌ Failed to auto-generate initial drafts during rollover:', genErr);
+      throw new Error('下書きが存在せず初期生成にも失敗したため、投稿処理を中断しました。');
+    }
+  }
+
+  const publishedPost = cleanDrafts[0];
+
+  let gbpPublished = false;
+  let gbpResponse = null;
+
+  const clientID = process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+  const locationIdInput = shop.google_location_id || (shop.keywords && shop.keywords.gbp_action_url);
+
+  let resolvedPath: string | null = null;
+  if (clientID && clientSecret && refreshToken && locationIdInput) {
+    try {
+      const oauth2Client = new google.auth.OAuth2(clientID, clientSecret, 'http://localhost');
+      oauth2Client.setCredentials({ refresh_token: refreshToken });
+      resolvedPath = await resolveGoogleLocationPath(oauth2Client, locationIdInput);
+    } catch (resolveErr: any) {
+      console.error('⚠️ Failed to resolve location path for rollover:', resolveErr.message || resolveErr);
+    }
+  }
+
+  if (resolvedPath) {
+    const isPendingOrInvalid =
+      publishedPost.text.includes('【下書き生成保留中】') ||
+      publishedPost.text.includes('AI APIクレジット') ||
+      publishedPost.text.includes('自動生成を保留') ||
+      publishedPost.text.includes('【AI生成保留中】') ||
+      publishedPost.text.trim().length < 30;
+
+    if (isPendingOrInvalid) {
+      console.warn(`⚠️ [GBP安全遮断] 店舗「${shop.name}」: 本日の下書きはAI生成保留中のため、Googleマップへの一般公開を安全にスキップしました。`);
+    } else {
+      console.log(`📡 Attempting real GBP post creation for location: ${resolvedPath}`);
+      const oauth2Client = new google.auth.OAuth2(clientID, clientSecret, 'http://localhost');
+      oauth2Client.setCredentials({ refresh_token: refreshToken });
+      
+      let mediaPayload = undefined;
+      if (publishedPost.imageFileId) {
+        const apiBaseUrl = process.env.RENDER_EXTERNAL_URL || process.env.BACKEND_API_BASE_URL || 'http://localhost:3000';
+        const sourceUrl = `${apiBaseUrl}/api/shops/${shopId}/drive-images/${publishedPost.imageFileId}/view`;
+        mediaPayload = [
+          {
+            mediaFormat: 'PHOTO',
+            sourceUrl: sourceUrl,
+          }
+        ];
+      }
+
+      let finalPostText = publishedPost.text;
+      if (shop.keywords && shop.keywords.fixed_footer) {
+        finalPostText = `${finalPostText}\n\n━━━━━━━━━━━━━━━━\n${shop.keywords.fixed_footer}`;
+      }
+
+      let normalizedText = finalPostText.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      normalizedText = normalizedText.replace(/\n{3,}/g, '\n\n');
+
+      const gbpPostText = normalizedText
+        .split('\n')
+        .map((line: string) => {
+          const trimmed = line.trim();
+          if (trimmed === '') {
+            return '　\u200B';
+          }
+          return trimmed;
+        })
+        .join('\n');
+
+      let callToActionPayload = undefined;
+      if (shop.keywords && shop.keywords.gbp_action_url) {
+        callToActionPayload = {
+          actionType: 'LEARN_MORE',
+          url: shop.keywords.gbp_action_url
+        };
+      }
+
+      const postTimeHour = (shop.keywords as any)?.post_time_hour ?? 9;
+      const now = new Date();
+      const jstHourStr = new Intl.DateTimeFormat('ja-JP', {
+        timeZone: 'Asia/Tokyo',
+        hour: '2-digit',
+        hour12: false
+      }).format(now);
+      const currentHour = parseInt(jstHourStr || '0', 10);
+      const isDelayedCycle = currentHour > postTimeHour;
+
+      let gbpSuccess = false;
+      let lastGbpError: any = null;
+
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          console.log(`📡 [GBP投稿 試行 ${attempt}/2] Location: ${resolvedPath}`);
+          const response = await oauth2Client.request({
+            url: `https://mybusiness.googleapis.com/v4/${resolvedPath}/localPosts`,
+            method: 'POST',
+            data: {
+              languageCode: 'ja-JP',
+              summary: gbpPostText,
+              topicType: 'STANDARD',
+              ...(mediaPayload ? { media: mediaPayload } : {}),
+              ...(callToActionPayload ? { callToAction: callToActionPayload } : {})
+            }
+          });
+
+          gbpPublished = true;
+          gbpResponse = response.data;
+          gbpSuccess = true;
+          console.log('✅ Successfully published real post to Google Business Profile!');
+          break;
+        } catch (gbpError: any) {
+          lastGbpError = gbpError;
+          console.error(`⚠️ [GBP投稿 試行 ${attempt}/2 失敗]:`, gbpError.message || gbpError);
+          if (attempt < 2) {
+            await new Promise(r => setTimeout(r, 2000));
+          }
+        }
+      }
+
+      if (!gbpSuccess && mediaPayload && isDelayedCycle) {
+        console.warn(`🛡️ [GBPテキストフォールバック起動] 設定時刻から1時間経過のため、テキストのみで再試行します...`);
+        try {
+          const fallbackRes = await oauth2Client.request({
+            url: `https://mybusiness.googleapis.com/v4/${resolvedPath}/localPosts`,
+            method: 'POST',
+            data: {
+              languageCode: 'ja-JP',
+              summary: gbpPostText,
+              topicType: 'STANDARD',
+              ...(callToActionPayload ? { callToAction: callToActionPayload } : {})
+            }
+          });
+          gbpPublished = true;
+          gbpResponse = fallbackRes.data;
+          gbpSuccess = true;
+          console.log('✅ [テキストフォールバック成功] Googleマップへ正常に公開されました！');
+        } catch (fallbackErr: any) {
+          lastGbpError = fallbackErr;
+        }
+      }
+
+      if (!gbpSuccess) {
+        const isDemoStore = shop.name.includes('Avenir') || shop.name.includes('デモ') || (shop.google_location_id && shop.google_location_id.includes('demo'));
+        if (isDemoStore && (lastGbpError?.message?.includes('Requested entity was not found') || lastGbpError?.status === 404)) {
+          console.warn(`ℹ️ [デモ店舗判定] デモ用店舗のため、GBP実送信エラーを無視してシミュレーション投稿を継続します。`);
+        } else {
+          throw new Error(`Googleマップ(GBP)への投稿に失敗しました: ${lastGbpError?.message || lastGbpError}`);
+        }
+      }
+    }
+  }
+
+  let driveFilesList: DriveFileItem[] = [];
+  const auth = getGoogleAuthClient();
+  if (auth && shop.google_drive_folder_id) {
+    driveFilesList = await fetchDriveFilesWithSubfolders(auth, shop.google_drive_folder_id);
+  }
+
+  const nextDayMinus1 = {
+    dayIndex: -1,
+    title: '本日投稿済みの下書き',
+    text: publishedPost.text,
+    subKeywords: publishedPost.subKeywords,
+    imageFileId: publishedPost.imageFileId || null,
+    publishedAt: new Date().toISOString(),
+  };
+
+  const draft1 = cleanDrafts[1] || publishedPost;
+  const draft2 = cleanDrafts[2] || publishedPost;
+
+  const nextDay0 = {
+    dayIndex: 0,
+    title: '明日投稿予定の下書き (Day 0)',
+    text: draft1.text,
+    subKeywords: draft1.subKeywords,
+    imageFileId: draft1.imageFileId || null,
+  };
+
+  const nextDay1 = {
+    dayIndex: 1,
+    title: '明後日投稿予定の下書き (Day 1)',
+    text: draft2.text,
+    subKeywords: draft2.subKeywords,
+    imageFileId: draft2.imageFileId || null,
+  };
+
+  const imageCount = driveFilesList.length;
+  const isAlternating = imageCount >= 1 && imageCount < 10;
+  const forceTextOnlyForDay2 = isAlternating ? !!draft2.imageFileId : false;
+
+  let nextDay2;
+  try {
+    const newDay2Raw = await generateSingleDraft(shop, 2, driveFilesList, forceTextOnlyForDay2);
+    nextDay2 = {
+      dayIndex: 2,
+      title: '明々後日投稿予定の下書き (Day 2)',
+      text: newDay2Raw.text,
+      subKeywords: newDay2Raw.subKeywords,
+      imageFileId: newDay2Raw.imageFileId || null,
+    };
+  } catch (aiErr: any) {
+    console.error(`⚠️ [AI下書き生成エラー] 店舗「${shop.name}」のDay 2下書き自動生成に失敗しました:`, aiErr.message || aiErr);
+    let fallbackSubs: string[] = [];
+    try {
+      if (shop.keywords?.sub_keywords) {
+        fallbackSubs = JSON.parse(shop.keywords.sub_keywords).slice(0, 2);
+      }
+    } catch (e) {}
+
+    nextDay2 = {
+      dayIndex: 2,
+      title: '明々後日投稿予定の下書き (Day 2 - AI生成保留中)',
+      text: '【下書き生成保留中】Google AI APIのクレジット残高不足、または通信タイムアウトにより自動生成を保留しました。APIクレジット確認後、ダッシュボードの「下書きを再生成」ボタンから再作成してください。',
+      subKeywords: fallbackSubs,
+      imageFileId: null,
+    };
+  }
+
+  const newDrafts = [nextDayMinus1, nextDay0, nextDay1, nextDay2];
+
+  await prisma.shopKeywords.update({
+    where: { shop_id: shopId },
+    data: {
+      draft_posts: JSON.stringify(newDrafts)
+    }
+  });
+
+  return {
+    publishedPost,
+    gbpPublished,
+    gbpResponse,
+    newDrafts,
+  };
+}
+
+// POST /api/shops/:shopId/batch/run-daily-post
+app.post('/api/shops/:shopId/batch/run-daily-post', async (req, res) => {
+  const { shopId } = req.params;
+
+  try {
+    const result = await executeDailyPostRollover(shopId);
+
+    return res.json({
+      success: true,
+      message: '自動投稿およびスライド生成処理が正常に完了しました！',
+      publishedPost: {
+        text: result.publishedPost.text,
+        subKeywords: result.publishedPost.subKeywords,
+        simulated: !result.gbpPublished,
+        gbpResponse: result.gbpResponse,
+      },
+      newDrafts: result.newDrafts,
+    });
+  } catch (error: any) {
+    console.error('❌ Daily post rollover error:', error);
+    return res.status(500).json({ error: error.message || '自動生成バッチ処理の実行に失敗しました。' });
+  }
+});
+
+// ==============================================================================
+// ⏱️ Background Automated Scheduler
+// ==============================================================================
+let isSchedulerRunning = false;
+const alreadyPostedToday = new Set<string>();
+
+async function runBackgroundScheduler() {
+  if (isSchedulerRunning) {
+    console.log('🔒 [排他制御ガード] 現在すでに自動巡回バッチが実行中です。');
+    return;
+  }
+  isSchedulerRunning = true;
+
+  try {
+    const now = new Date();
+    
+    const jstFormatter = new Intl.DateTimeFormat('ja-JP', {
+      timeZone: 'Asia/Tokyo',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      hour12: false
+    });
+    const parts = jstFormatter.formatToParts(now);
+    const year = parts.find(p => p.type === 'year')?.value;
+    const month = parts.find(p => p.type === 'month')?.value;
+    const day = parts.find(p => p.type === 'day')?.value;
+    const hour = parts.find(p => p.type === 'hour')?.value;
+
+    const todayStr = `${year}-${month}-${day}`;
+    const currentHour = parseInt(hour || '0', 10);
+
+    console.log(`\n⏰ [${todayStr} ${hour}:00 JST] 365ライト バックグラウンド自動巡回サイクルを開始します...`);
+
+    if (currentHour === 0) {
+      alreadyPostedToday.clear();
+      console.log('🧹 [日付変更検知] 深夜0時(JST)を迎えたため、当日の投稿済みメモリキャッシュをクリアしました。');
+    }
+
+    const shops = await prisma.shop.findMany({
+      where: { post_active: true },
+      include: { keywords: true },
+    });
+
+    console.log(`🔎 稼働中店舗数: ${shops.length}件 を確認`);
+
+    for (const shop of shops) {
+      if (!shop.keywords) {
+        shop.keywords = await initializeShopKeywords(shop);
+      }
+
+      const postTimeHour = (shop.keywords as any)?.post_time_hour ?? 9;
+
+      let isAlreadyPostedTodayInDb = false;
+      if (shop.keywords && shop.keywords.draft_posts) {
+        try {
+          const drafts = JSON.parse(shop.keywords.draft_posts);
+          const postedItem = drafts.find((d: any) => d.dayIndex === -1);
+          if (postedItem && postedItem.publishedAt) {
+            const pubDateJst = jstFormatter.formatToParts(new Date(postedItem.publishedAt));
+            const pYear = pubDateJst.find(p => p.type === 'year')?.value;
+            const pMonth = pubDateJst.find(p => p.type === 'month')?.value;
+            const pDay = pubDateJst.find(p => p.type === 'day')?.value;
+            const pubDateStr = `${pYear}-${pMonth}-${pDay}`;
+            if (pubDateStr === todayStr) {
+              isAlreadyPostedTodayInDb = true;
+            }
+          }
+        } catch (e) {}
+      }
+
+      const memoryKey = `${shop.id}_${todayStr}`;
+
+      if (currentHour >= postTimeHour) {
+        if (isAlreadyPostedTodayInDb || alreadyPostedToday.has(memoryKey)) {
+          console.log(`✓ 店舗「${shop.name}」: 本日分（${todayStr}）は既に投稿・ロールオーバー完了済みです。`);
+          alreadyPostedToday.add(memoryKey);
+          continue;
+        }
+
+        console.log(`🚀 [自動投稿実行] 店舗「${shop.name}」: 設定時刻 ${postTimeHour}:00 (現在: ${currentHour}:00 JST) ➔ 投稿処理を開始します...`);
+        alreadyPostedToday.add(memoryKey);
+        try {
+          await executeDailyPostRollover(shop.id);
+          console.log(`✅ [自動投稿成功] 店舗「${shop.name}」の投稿＆下書きスライドが完了しました！`);
+        } catch (postErr: any) {
+          console.error(`❌ [自動投稿失敗] 店舗「${shop.name}」の投稿処理でエラー:`, postErr.message || postErr);
+          alreadyPostedToday.delete(memoryKey);
+        }
+      } else {
+        console.log(`⏳ 店舗「${shop.name}」: 投稿予定時刻は ${postTimeHour}:00 です (現在: ${currentHour}:00 JST ➔ 待機中)`);
+      }
+    }
+  } catch (err) {
+    console.error('❌ Scheduler error:', err);
+  } finally {
+    isSchedulerRunning = false;
+  }
+}
+
+// POST /api/batch/trigger-scheduler
+app.post('/api/batch/trigger-scheduler', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  const cronSecret = process.env.CRON_SECRET;
+
+  if (!cronSecret) {
+    return res.status(500).json({ error: 'サーバー側でCronセキュリティキーが設定されていません。' });
+  }
+
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: '認証キーが提供されていません。' });
+  }
+
+  const token = authHeader.split(' ')[1];
+  if (token !== cronSecret) {
+    return res.status(403).json({ error: '認証キーが一致しません。アクセスが拒否されました。' });
+  }
+
+  console.log('📡 [セキュアCronリクエスト受信] バックグラウンドバッチ同期スケジュールを起動します...');
+  
+  runBackgroundScheduler()
+    .then(() => console.log('✅ Secure background scheduler completed.'))
+    .catch((err) => console.error('❌ Secure background scheduler failed:', err.message || err));
+
+  return res.json({ success: true, message: 'バックグラウンドバッチ処理（自動投稿＆自動スライド）を正常に起動しました！' });
+});
+
+// Start express server
+app.listen(port, () => {
+  console.log(`\n================================================================================`);
+  console.log(`🚀 365ライト - Express API Server running on: http://localhost:${port}`);
+  console.log(`📅 Started on: ${new Date().toLocaleString()}`);
+  console.log(`================================================================================\n`);
+
+  console.log('⏱️ [Internal Scheduler] Initializing internal fallback scheduler (10-minute intervals)...');
+  setInterval(async () => {
+    try {
+      await runBackgroundScheduler();
+    } catch (err: any) {
+      console.error('❌ [Internal Scheduler] Failed:', err.message || err);
+    }
+  }, 10 * 60 * 1000);
+
+  setTimeout(async () => {
+    try {
+      await runBackgroundScheduler();
+    } catch (err: any) {
+      console.error('❌ [Internal Scheduler] Initial startup sync failed:', err.message || err);
+    }
+  }, 15 * 1000);
+});

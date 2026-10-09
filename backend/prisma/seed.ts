@@ -1,0 +1,148 @@
+import { PrismaClient } from '@prisma/client';
+
+const prisma = new PrismaClient();
+
+async function main() {
+  console.log('🌱 Starting 365LIGHT database seeding...');
+
+  // 1. Admin Account
+  const adminId = 'admin-365light-uuid';
+  await prisma.shop.upsert({
+    where: { id: adminId },
+    update: {
+      email: 'admin@365light.jp',
+      password: 'password',
+      role: 'ADMIN',
+    },
+    create: {
+      id: adminId,
+      name: '365ライト システム管理本部',
+      email: 'admin@365light.jp',
+      password: 'password',
+      role: 'ADMIN',
+      google_location_id: null,
+      google_drive_folder_id: null,
+      post_active: false,
+    },
+  });
+  console.log('👮 Admin account created/updated: admin@365light.jp');
+
+  // 2. Demo Agency Account
+  const targetAgencyId = 'demo-agency-uuid';
+  await prisma.shop.upsert({
+    where: { id: targetAgencyId },
+    update: {
+      name: '代理店X',
+      email: 'light@dairiten.x',
+      password: 'light@dairiten.x',
+      role: 'AGENCY',
+      agency_name: '代理店X',
+    },
+    create: {
+      id: targetAgencyId,
+      name: '代理店X',
+      email: 'light@dairiten.x',
+      password: 'light@dairiten.x',
+      role: 'AGENCY',
+      agency_name: '代理店X',
+      post_active: true,
+    },
+  });
+  console.log('🏢 Agency account created/updated: light@dairiten.x');
+
+  // 3. Demo Store Account (Avenir Hair)
+  const targetAvenirId = 'demo-store-uuid';
+  await prisma.shop.upsert({
+    where: { id: targetAvenirId },
+    update: {
+      name: '美髪改善サロン Avenir Hair',
+      email: 'meoseiha@avenir',
+      password: 'meoseiha@avenir',
+      role: 'OWNER',
+      agency_name: '代理店X',
+      google_location_id: 'locations/demo-loc-365',
+      google_drive_folder_id: '10c1rRfqpsdLRz_ZlOgEXJFR7BoVsRjXe',
+      post_active: true,
+    },
+    create: {
+      id: targetAvenirId,
+      name: '美髪改善サロン Avenir Hair',
+      email: 'meoseiha@avenir',
+      password: 'meoseiha@avenir',
+      role: 'OWNER',
+      agency_name: '代理店X',
+      google_location_id: 'locations/demo-loc-365',
+      google_drive_folder_id: '10c1rRfqpsdLRz_ZlOgEXJFR7BoVsRjXe',
+      post_active: true,
+    },
+  });
+
+  // 4. Store Keywords & Initial 3-day Drafts
+  const mainKeywords = ['栄 美容室', '名古屋 髪質改善', '栄 カット', '髪質改善 サロン'];
+  const subKeywords = ['完全個室サロン', '縮毛矯正 栄', '白髪染め 名古屋', 'トリートメント 推奨'];
+  const fixedFooter = '店舗名: 美髪改善サロン Avenir Hair (アヴニールヘア)\n住所: 愛知県名古屋市中区栄3丁目\n営業時間: 10:00〜20:00 (完全予約制)\n定休日: 毎週月曜日\nご予約・お問い合わせはお気軽にどうぞ！';
+  const customPrompt = '完全個室のリラックス空間と、髪を傷めない最先端の髪質改善トリートメント、そして丁寧なカウンセリング技術を上品かつ温かみのあるトーンでPRしてください。';
+
+  const initialDrafts = [
+    {
+      dayIndex: 0,
+      title: '今日投稿予定の下書き (Day 0)',
+      text: '【髪質改善】栄駅徒歩5分の完全個室サロン Avenir Hair です。\n当サロンでは、お客様一人ひとりの髪質やクセに徹底的に向き合う「丁寧なカウンセリング技術」を大切にしています。\n\n栄で完全個室だからこそ、周りを気にせず髪のパサつきやダメージについて髪質改善トリートメントのご相談をいただけます。\n\n・オーダーメイド極上髪質改善メニュー\n・完全個室のリラックスできるサロン空間\n・髪を傷めない最先端トリートメント技術\n\nお客様の髪本来の輝きとサロントリートメントによる感動的な艶を引き出します。\nお体のメンテナンスを兼ねて、ぜひ下記の「詳細」ボタンよりご予約情報をご確認ください。',
+      subKeywords: ['完全個室サロン', 'トリートメント 推奨'],
+      imageFileId: '1ICy4qoD6qjOr-w4vD6T3I_xEAxMY0N4B'
+    },
+    {
+      dayIndex: 1,
+      title: '明日投稿予定の下書き (Day 1)',
+      text: '【縮毛矯正】うねりやくせ毛でお悩みなら栄の「Avenir Hair」にお任せください。\n当サロンでは、髪を傷めない最先端の薬剤を使用し、髪質改善トリートメントを同時に配合した縮毛矯正をご提供しています。\n\n完全個室のリラックスした極上空間で、仕上がりは驚くほど柔らかく滑らかな艶髪を実現します。\n\n・うねりやクセを自然に抑える縮毛矯正\n・丁寧なカウンセリングでお悩み徹底解消\n・縮毛矯正と髪質改善のダブルアプローチ\n\n毎朝のスタイリングが感動するほど楽になりますよ。\n詳しくは詳細ボタンよりご予約や空き状況をご確認ください。',
+      subKeywords: ['縮毛矯正 栄', '完全個室サロン'],
+      imageFileId: '1YRczsnYk5_EpPhY3U7N2RjyyOF8629u_'
+    },
+    {
+      dayIndex: 2,
+      title: '明後日投稿予定の下書き (Day 2)',
+      text: '【白髪染め】頭皮と髪を優しく守る栄の髪質改善カラーなら「Avenir Hair」です。\n「白髪は染めたいけれど髪のパサつきやダメージが気になる」とお悩みではありませんか？\n\n当サロン独自の髪質改善トリートメントを配合した、優しく低刺激なオーガニックカラーをご提案します。\n\n・白髪染めとトリートメントの極上融合\n・完全個室でゆったり過ごせる大人の隠れ家\n・髪質に合わせたオーダーメイド施術\n\n潤いに満ちた、若々しくしっとりまとまる美しい艶髪に仕上げます。\nぜひ下記の詳細ボタンより空き状況をご確認ください。',
+      subKeywords: ['白髪染め 名古屋', 'トリートメント 推奨'],
+      imageFileId: '1iLC1rMI5az8xd8nK8tOEK9ZuszpDFHwW'
+    }
+  ];
+
+  await prisma.shopKeywords.upsert({
+    where: { shop_id: targetAvenirId },
+    update: {
+      main_keywords: JSON.stringify(mainKeywords),
+      sub_keywords: JSON.stringify(subKeywords),
+      fixed_footer: fixedFooter,
+      custom_prompt: customPrompt,
+      hp_url: 'https://avenir-hair-demo.example.com',
+      hotpepper_url: 'https://beauty.hotpepper.jp/avenir-hair-demo',
+      gbp_action_url: 'https://beauty.hotpepper.jp/avenir-hair-demo/reserve',
+      post_time_hour: 9,
+      draft_posts: JSON.stringify(initialDrafts),
+    },
+    create: {
+      shop_id: targetAvenirId,
+      main_keywords: JSON.stringify(mainKeywords),
+      sub_keywords: JSON.stringify(subKeywords),
+      fixed_footer: fixedFooter,
+      custom_prompt: customPrompt,
+      hp_url: 'https://avenir-hair-demo.example.com',
+      hotpepper_url: 'https://beauty.hotpepper.jp/avenir-hair-demo',
+      gbp_action_url: 'https://beauty.hotpepper.jp/avenir-hair-demo/reserve',
+      post_time_hour: 9,
+      draft_posts: JSON.stringify(initialDrafts),
+    },
+  });
+
+  console.log('📝 Demo shop Avenir Hair & Keywords seeded successfully!');
+  console.log('🟢 Database seeding completed!');
+}
+
+main()
+  .catch((e) => {
+    console.error('❌ Seeding failed with error:', e);
+    process.exit(1);
+  })
+  .finally(async () => {
+    await prisma.$disconnect();
+  });
