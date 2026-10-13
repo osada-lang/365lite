@@ -1075,7 +1075,7 @@ export async function generateSingleDraft(
   }
 
   const genAI = new GoogleGenerativeAI(geminiApiKey);
-  const model = genAI.getGenerativeModel({ model: 'gemini-3.6-flash' });
+  const model = genAI.getGenerativeModel({ model: 'gemini-3.8-flash' });
 
   const themes = [
     {
@@ -1174,14 +1174,14 @@ export async function generateSingleDraft(
     const response = await result.response;
     generatedText = response.text().trim().replace(/```/g, '');
   } catch (err: any) {
-    console.warn('⚠️ gemini-3.6-flash fallback to gemini-3.5-flash:', err.message || err);
+    console.warn('⚠️ gemini-3.8-flash fallback to gemini-3.6-flash:', err.message || err);
     try {
-      const fallbackModel = genAI.getGenerativeModel({ model: 'gemini-3.5-flash' });
+      const fallbackModel = genAI.getGenerativeModel({ model: 'gemini-3.6-flash' });
       const result = await fallbackModel.generateContent(prompt);
       const response = await result.response;
       generatedText = response.text().trim().replace(/```/g, '');
     } catch (fallbackErr: any) {
-      console.error('❌ Both gemini-3.6-flash and gemini-3.5-flash failed:', fallbackErr.message || fallbackErr);
+      console.error('❌ Both gemini-3.8-flash and gemini-3.6-flash failed:', fallbackErr.message || fallbackErr);
       throw fallbackErr;
     }
   }
