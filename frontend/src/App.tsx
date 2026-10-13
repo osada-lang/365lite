@@ -26,7 +26,7 @@ const API_BASE = metaEnv && metaEnv.VITE_API_BASE_URL
   ? (metaEnv.VITE_API_BASE_URL.endsWith('/api') ? metaEnv.VITE_API_BASE_URL : `${metaEnv.VITE_API_BASE_URL}/api`)
   : (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
     ? 'http://localhost:3000/api'
-    : '/api');
+    : 'https://api.365lite.jp/api');
 
 interface ShopProfile {
   id: string;
@@ -1133,7 +1133,7 @@ export default function App() {
                               <div className="flex items-start gap-4 bg-slate-50/50 border border-slate-100 rounded-xl p-3.5">
                                 <div className="w-24 h-24 bg-slate-900/5 rounded-xl overflow-hidden border border-slate-200/60 shrink-0 shadow-sm">
                                   <img
-                                    src={`${API_BASE.replace('/api', '')}/api/shops/${currentShop?.id}/drive-images/${d.imageFileId}/view`}
+                                    src={`${API_BASE}/shops/${currentShop?.id}/drive-images/${d.imageFileId}/view`}
                                     alt={d.dayIndex === -1 ? "投稿済みの写真" : "投稿予定の写真"}
                                     className="object-cover w-full h-full hover:scale-105 transition-transform duration-200"
                                   />
@@ -1392,7 +1392,7 @@ export default function App() {
                     <div key={photo.id} className="bg-white border border-slate-200/80 rounded-2xl overflow-hidden shadow-sm flex flex-col group relative">
                       <div className="aspect-square bg-slate-900/5 relative flex items-center justify-center overflow-hidden border-b border-slate-100">
                         <img
-                          src={photo.dataUrl || `${API_BASE.replace('/api', '')}/api/shops/${currentShop?.id}/drive-images/${photo.id}/view`}
+                          src={photo.dataUrl || `${API_BASE}/shops/${currentShop?.id}/drive-images/${photo.id}/view`}
                           alt={photo.name}
                           className="object-cover w-full h-full"
                         />
