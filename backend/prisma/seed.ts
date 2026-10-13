@@ -3,21 +3,21 @@ import { PrismaClient } from '@prisma/client';
 const prisma = new PrismaClient();
 
 async function main() {
-  console.log('🌱 Starting 365LIGHT database seeding...');
+  console.log('🌱 Starting 365LITE database seeding...');
 
   // 1. Admin Account
-  const adminId = 'admin-365light-uuid';
+  const adminId = 'admin-365lite-uuid';
   await prisma.shop.upsert({
     where: { id: adminId },
     update: {
-      email: 'admin@365light.jp',
+      email: 'admin@365lite.jp',
       password: 'password',
       role: 'ADMIN',
     },
     create: {
       id: adminId,
       name: '365ライト システム管理本部',
-      email: 'admin@365light.jp',
+      email: 'admin@365lite.jp',
       password: 'password',
       role: 'ADMIN',
       google_location_id: null,
@@ -25,7 +25,7 @@ async function main() {
       post_active: false,
     },
   });
-  console.log('👮 Admin account created/updated: admin@365light.jp');
+  console.log('👮 Admin account created/updated: admin@365lite.jp');
 
   // 2. Demo Agency Account
   const targetAgencyId = 'demo-agency-uuid';
@@ -33,22 +33,22 @@ async function main() {
     where: { id: targetAgencyId },
     update: {
       name: '代理店X',
-      email: 'light@dairiten.x',
-      password: 'light@dairiten.x',
+      email: 'lite@dairiten.x',
+      password: 'lite@dairiten.x',
       role: 'AGENCY',
       agency_name: '代理店X',
     },
     create: {
       id: targetAgencyId,
       name: '代理店X',
-      email: 'light@dairiten.x',
-      password: 'light@dairiten.x',
+      email: 'lite@dairiten.x',
+      password: 'lite@dairiten.x',
       role: 'AGENCY',
       agency_name: '代理店X',
       post_active: true,
     },
   });
-  console.log('🏢 Agency account created/updated: light@dairiten.x');
+  console.log('🏢 Agency account created/updated: lite@dairiten.x');
 
   // 3. Demo Store Account (Avenir Hair)
   const targetAvenirId = 'demo-store-uuid';

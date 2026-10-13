@@ -1,7 +1,7 @@
 {
-  "name": "365light-backend",
+  "name": "365lite-backend",
   "version": "1.0.0",
-  "description": "365LIGHT - Google Business Profile Daily Automated Posting Backend",
+  "description": "365LITE - Google Business Profile Daily Automated Posting Backend",
   "main": "dist/index.js",
   "scripts": {
     "dev": "nodemon --watch src --ext ts --exec tsx src/index.ts",
