@@ -242,6 +242,8 @@ async function fetchDriveFilesWithSubfolders(auth: any, rawFolderId: string): Pr
         q: `'${rootFolderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
         fields: 'files(id, name)',
         pageSize: 100,
+        supportsAllDrives: true,
+        includeItemsFromAllDrives: true,
       });
       subfolders = subfolderRes.data.files || [];
       subfolders.forEach((f: any) => {
@@ -260,6 +262,8 @@ async function fetchDriveFilesWithSubfolders(auth: any, rawFolderId: string): Pr
       q: `(${parentQuery}) and (mimeType = 'image/jpeg' or mimeType = 'image/png' or mimeType = 'image/jpg') and trashed = false`,
       fields: 'files(id, name, mimeType, size, createdTime, parents, imageMediaMetadata)',
       pageSize: 1000,
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
     });
 
     const files = imageRes.data.files || [];
@@ -853,6 +857,7 @@ app.get('/api/shops/:shopId/drive-images/:fileId/view', async (req, res) => {
     const metadata = await drive.files.get({
       fileId,
       fields: 'mimeType',
+      supportsAllDrives: true,
     });
 
     res.setHeader('Content-Type', metadata.data.mimeType || 'image/jpeg');
@@ -861,6 +866,7 @@ app.get('/api/shops/:shopId/drive-images/:fileId/view', async (req, res) => {
     const fileRes = await drive.files.get({
       fileId,
       alt: 'media',
+      supportsAllDrives: true,
     }, { responseType: 'stream' });
 
     fileRes.data.pipe(res);
@@ -892,6 +898,8 @@ app.get('/api/shops/:shopId/drive-folders', async (req, res) => {
       q: `'${folderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
       fields: 'files(id, name)',
       pageSize: 100,
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
     });
 
     const folders = (subfolderRes.data.files || []).map((f: any) => ({
@@ -971,6 +979,7 @@ app.post('/api/shops/:shopId/drive-images/upload', async (req, res) => {
             parents: [destinationFolderId],
           },
           fields: 'id, name',
+          supportsAllDrives: true,
         });
         if (folderCreateRes.data.id) {
           destinationFolderId = folderCreateRes.data.id;
@@ -982,7 +991,7 @@ app.post('/api/shops/:shopId/drive-images/upload', async (req, res) => {
     } else if (targetFolderId && targetFolderId !== 'root') {
       destinationFolderId = targetFolderId;
       try {
-        const fMeta = await drive.files.get({ fileId: targetFolderId, fields: 'name' });
+        const fMeta = await drive.files.get({ fileId: targetFolderId, fields: 'name', supportsAllDrives: true });
         targetFolderName = fMeta.data.name?.trim();
       } catch (e) {}
     }
@@ -1001,6 +1010,7 @@ app.post('/api/shops/:shopId/drive-images/upload', async (req, res) => {
         body: bufferStream,
       },
       fields: 'id, name, mimeType, size, createdTime',
+      supportsAllDrives: true,
     });
 
     const file = uploadRes.data;
@@ -1044,7 +1054,7 @@ app.delete('/api/shops/:shopId/drive-images/:fileId', async (req, res) => {
     }
 
     const drive = google.drive({ version: 'v3', auth });
-    await drive.files.delete({ fileId });
+    await drive.files.delete({ fileId, supportsAllDrives: true });
 
     return res.json({ success: true, fileId, isMock: false });
   } catch (error: any) {
@@ -1691,6 +1701,8 @@ async function executeDailyPostRollover(shopId: string) {
           q: `parents in '${driveFolderId}' and (mimeType = 'image/jpeg' or mimeType = 'image/png' or mimeType = 'image/jpg') and trashed = false`,
           fields: 'files(id, name)',
           pageSize: 1000,
+          supportsAllDrives: true,
+          includeItemsFromAllDrives: true,
         });
         if (driveRes.data.files) {
           driveFilesList = driveRes.data.files.map((f: any) => ({ id: f.id || '', name: f.name || '' }));
