@@ -1282,7 +1282,11 @@ export async function generateSingleDraft(
     }
   ];
 
-  const todayJp = new Date().toLocaleDateString('ja-JP', {
+  // Get current target date and day of week in JST calculated dynamically from dayIndex offset
+  const now = new Date();
+  const targetDate = new Date(now.getTime() + dayIndex * 24 * 60 * 60 * 1000);
+  const targetDateJp = targetDate.toLocaleDateString('ja-JP', {
+    timeZone: 'Asia/Tokyo',
     year: 'numeric',
     month: 'long',
     day: 'numeric',
@@ -1293,6 +1297,7 @@ export async function generateSingleDraft(
     const selectedTheme = standardThemes[dayIndex % standardThemes.length];
     return `
     あなたは店舗「${shop.name}」のオーナー代理として、Googleマップ（MEO）および生成AI検索（AIO/LLMO）向けに最適化された、日替わりの店舗投稿テキスト（おしらせ/最新情報）を自動作成してください。
+    ※「ターゲット層へのアピール・トーンマナー」で英語等の言語指定がある場合は、必ずその指定された言語で執筆してください。特に指定がない場合は自然な日本語で執筆してください。
 
     【今回の投稿テーマ・検索意図】
     - テーマ名: ${selectedTheme.name}
@@ -1303,7 +1308,11 @@ export async function generateSingleDraft(
     - 店舗名: ${shop.name}
     - 所在地住所情報（固定フッターより抜粋）: ${fixedFooter || '未設定'}
     - ターゲット層へのアピール・トーンマナー: ${customPrompt || '親しみやすく誠実なトーン。'}
-    - 今日の日付: ${todayJp}
+    - 本日の下書きの投稿予定日: ${targetDateJp}
+    - 投稿スロット番号: Day ${dayIndex} (${dayIndex === 0 ? '本日投稿分' : dayIndex === 1 ? '明日投稿分' : '明後日・3日後投稿分'})
+
+    【曜日別・日毎の言語切り替えルール（指定がある場合）】
+    ※「ターゲット層へのアピール・トーンマナー」において「月曜日は英語」「土日は英語」「1日おきに英語」などの曜日・日毎の言語条件指定がある場合は、上記の【本日の下書きの投稿予定日】の曜日や【投稿スロット番号】を元に、該当する日のみ指定された言語（英語等）、それ以外の日は自然な日本語で執筆してください。特に言語指定がない場合は自然な日本語で執筆してください。
 
     【作成の絶対ルール（厳守してください）】
     1. 結論ファースト（PREP法）の徹底:
@@ -1314,7 +1323,7 @@ export async function generateSingleDraft(
        主語を「当店」や「当院」などの曖昧な言葉にせず、必ず「${shop.name}」という具体的な店舗名で表記してください。また、エリア名（店舗の所在地・地域）を一文の中に自然に含めてください。エリア名については、必ず「所在地住所情報（固定フッター）」に記載されている住所情報のみから正しい地域名（市区町村名や駅名など）を抽出し、それを使用してください。フッターに住所情報がない場合、あるいは未設定の場合は、具体的な地域名は出力せず、所在地を特定しない汎用的な表現にしてください。メインキーワードやその他の情報から地域名を取得したり、存在しない架空の地域名を捏造することは絶対に禁止します。
 
     3. メインキーワードの完全含有:
-       指定されたメインキーワード [ ${mainKeywords.join(', ')} ] を、文章全体の自然な文脈にそって【すべて必ず】本文中に含めてください。単なるキーワードの羅列や強引な詰め込みは厳禁です。
+       指定されたメインキーワード [ ${mainKeywords.join(', ')} ] を、文章全体の自然な文脈にそって【すべて必ず】本文中に含めてください。単なるキーワードの羅列や強引な詰め込みは厳禁です。（※英語等の指定がある場合でも、メインキーワードを文脈に合わせて適切に含めてください）
 
     4. 本日のサブキーワード:
        本日の日替わりサブキーワード [ ${selectedSubKeywords.join(', ')} ] を、文章の中に自然に盛り込んでください。
@@ -1332,14 +1341,15 @@ export async function generateSingleDraft(
 
     7. アクション喚起（CTA）の自然な配置（後半）:
        文章の最後（箇条書きの後）の締めくくりのアクション喚起（CTA）として、必ず次の指定テキストを【一言一句違わずに固定の1文】としてそのまま出力してください。
-       指定テキスト：「『詳細』ボタン、またはプロフィールのウェブサイトリンクからお気軽にお問い合わせください。」
+       指定テキスト（日本語の場合）：「『詳細』ボタン、またはプロフィールのウェブサイトリンクからお気軽にお問い合わせください。」
+       指定テキスト（英語指定の場合）：「Please feel free to contact us via the 'Learn more' button or the website link in our profile.」
        （※この指定テキスト以外の独自の行動喚起や売り込みの文章、連絡先などを追加することは【絶対に】禁止します）
 
     8. 段落分けと空行の徹底（スマートフォン可読性の最適化）:
        文章全体が視覚的に詰まって見苦しくなるのを防ぐため、一つの段落は必ず「1文〜最大2文程度（50文字〜100文字程度）」とし、各段落の間には【必ず空行を1行】挟んでください。
 
-    9. 文字数制限:
-       全体の本文は【500文字程度（改行を除く）】に収め、一般客が読んで親しみやすく自然な日本語で仕上げてください。
+    9. 文字数および言語制限:
+       全体の本文は【500文字程度（英語の場合は100〜150単語程度）】に収め、一般客が読んで親しみやすく自然な文章（トーンマナーで英語等の言語指定がある場合はその言語、特に指定がない場合は自然な日本語）で仕上げてください。
 
     10. 署名・連絡先・記号マークダウンの排除:
         本文の中には、ホームページURL、電話番号、アクションボタンの文言、住所、店舗名のフッター署名、および絵文字やマークダウン記号（**、#、*など）は【絶対に】含めないでください。純粋な文章テキストと「・」マーク、改行のみで出力してください。
@@ -1370,7 +1380,8 @@ export async function generateSingleDraft(
     - 店舗名: ${shop.name}
     - 所在地住所情報（固定フッターより抜粋）: ${fixedFooter || '未設定'}
     - ターゲット層へのアピール・トーンマナー: ${customPrompt || '親しみやすく誠実なトーン。'}
-    - 今日の日付: ${todayJp}
+    - 本日の下書きの投稿予定日: ${targetDateJp}
+    - 投稿スロット番号: Day ${dayIndex} (${dayIndex === 0 ? '本日投稿分' : dayIndex === 1 ? '明日投稿分' : '明後日・3日後投稿分'})
 
     ## 【YMYL共通の最優先ルール（文章構成や文字数よりも優先します）】
     ### 1. 医療・健康情報の正確性
@@ -1795,8 +1806,19 @@ async function executeDailyPostRollover(shopId: string) {
       let callToActionPayload = undefined;
       if (shop.keywords && shop.keywords.gbp_action_url && shop.keywords.gbp_action_url.trim()) {
         const actionUrl = shop.keywords.gbp_action_url.trim();
-        const isGoogleShare = actionUrl.includes('share.google') || actionUrl.includes('maps.google') || actionUrl.includes('posts.gle') || actionUrl.includes('goo.gl/maps');
-        if (!isGoogleShare && (actionUrl.startsWith('http://') || actionUrl.startsWith('https://'))) {
+        const isGoogleMapsUrl = 
+          actionUrl.includes('maps.app.goo.gl') ||
+          actionUrl.includes('goo.gl/maps') ||
+          actionUrl.includes('maps.google.') ||
+          actionUrl.includes('google.com/maps') ||
+          actionUrl.includes('google.co.jp/maps') ||
+          actionUrl.includes('share.google') ||
+          actionUrl.includes('posts.gle');
+
+        if (isGoogleMapsUrl) {
+          console.warn(`⚠️ [GBP規約ガード] 店舗「${shop.name}」: Googleマップ自身のURLが詳細ボタンに設定されていたため、循環リンク違反・スパム判定を防ぐためボタン付与を安全にスキップしました。`);
+        } else if (actionUrl.startsWith('http://') || actionUrl.startsWith('https://')) {
+          console.log(`🔗 Attaching Call-to-Action button to GBP post: ${actionUrl}`);
           callToActionPayload = {
             actionType: 'LEARN_MORE',
             url: actionUrl
