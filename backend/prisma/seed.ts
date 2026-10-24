@@ -7,25 +7,27 @@ async function main() {
 
   // 1. Admin Account
   const adminId = 'admin-365lite-uuid';
+  const masterPassword = process.env.MASTER_ADMIN_PASSWORD || 'silver-ringo-815-park';
+  const masterEmail = process.env.MASTER_ADMIN_EMAIL || 'admin@365lite.jp';
   await prisma.shop.upsert({
     where: { id: adminId },
     update: {
-      email: 'admin@365lite.jp',
-      password: 'silver-ringo-815-park',
+      email: masterEmail,
+      password: masterPassword,
       role: 'ADMIN',
     },
     create: {
       id: adminId,
       name: '365ライト システム管理本部',
-      email: 'admin@365lite.jp',
-      password: 'silver-ringo-815-park',
+      email: masterEmail,
+      password: masterPassword,
       role: 'ADMIN',
       google_location_id: null,
       google_drive_folder_id: null,
       post_active: false,
     },
   });
-  console.log('👮 Admin account created/updated: admin@365lite.jp');
+  console.log(`👮 Admin account created/updated: ${masterEmail}`);
 
   // 2. Demo Agency Account
   const targetAgencyId = 'demo-agency-uuid';

@@ -2322,6 +2322,26 @@ app.listen(port, () => {
     .then(() => console.log('✅ Verified Shop.is_medical and Shop.post_start_date columns in database.'))
     .catch((e) => console.warn('⚠️ Could not auto-add columns:', e.message || e));
 
+  // Sync Master Admin Account password from MASTER_ADMIN_PASSWORD environment variable
+  const masterPassword = process.env.MASTER_ADMIN_PASSWORD || 'silver-ringo-815-park';
+  const masterEmail = process.env.MASTER_ADMIN_EMAIL || 'admin@365lite.jp';
+  prisma.shop.upsert({
+    where: { email: masterEmail },
+    update: {
+      password: masterPassword,
+      role: 'ADMIN',
+    },
+    create: {
+      name: '365ライト システム管理本部',
+      email: masterEmail,
+      password: masterPassword,
+      role: 'ADMIN',
+      post_active: false,
+    }
+  })
+  .then(() => console.log(`✅ Master Admin Account synced successfully! (Email: ${masterEmail})`))
+  .catch((e) => console.warn('⚠️ Could not auto-sync master admin account:', e.message || e));
+
   console.log('⏱️ [Internal Scheduler] Initializing internal fallback scheduler (10-minute intervals)...');
   setInterval(async () => {
     try {
