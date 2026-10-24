@@ -119,7 +119,7 @@ async function main() {
       agency_name: '365ライト（直営店契約）',
       google_location_id: 'locations/12155833518075984673',
       google_drive_folder_id: '1V7bcq1G3wKL9J3ID-UjmJZs_XBJZNQYy',
-      post_active: true,
+      post_active: false,
     },
     create: {
       id: targetIitokoId,
@@ -130,7 +130,7 @@ async function main() {
       agency_name: '365ライト（直営店契約）',
       google_location_id: 'locations/12155833518075984673',
       google_drive_folder_id: '1V7bcq1G3wKL9J3ID-UjmJZs_XBJZNQYy',
-      post_active: true,
+      post_active: false,
     },
   });
   console.log('🏢 Store account created/updated: いいとこ鍼灸院 (yeyuebinye99@gmail.com)');
