@@ -11,14 +11,14 @@ async function main() {
     where: { id: adminId },
     update: {
       email: 'admin@365lite.jp',
-      password: 'password',
+      password: 'silver-ringo-815-park',
       role: 'ADMIN',
     },
     create: {
       id: adminId,
       name: '365ライト システム管理本部',
       email: 'admin@365lite.jp',
-      password: 'password',
+      password: 'silver-ringo-815-park',
       role: 'ADMIN',
       google_location_id: null,
       google_drive_folder_id: null,
