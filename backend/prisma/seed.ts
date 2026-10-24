@@ -105,7 +105,35 @@ async function main() {
   });
   console.log('🏢 Store account created/updated: 株式会社陽向 (hinata.ry.2314@gmail.com)');
 
-  // 5. Demo Store Keywords & Initial 3-day Drafts
+  // 5. いいとこ鍼灸院 Store Account
+  const targetIitokoId = 'shop-iitoko-uuid';
+  await prisma.shop.upsert({
+    where: { id: targetIitokoId },
+    update: {
+      name: 'いいとこ鍼灸院',
+      email: 'yeyuebinye99@gmail.com',
+      password: 'iitoko-pass-7824',
+      role: 'OWNER',
+      agency_name: '365ライト（直営店契約）',
+      google_location_id: 'locations/12155833518075984673',
+      google_drive_folder_id: '1V7bcq1G3wKL9J3ID-UjmJZs_XBJZNQYy',
+      post_active: true,
+    },
+    create: {
+      id: targetIitokoId,
+      name: 'いいとこ鍼灸院',
+      email: 'yeyuebinye99@gmail.com',
+      password: 'iitoko-pass-7824',
+      role: 'OWNER',
+      agency_name: '365ライト（直営店契約）',
+      google_location_id: 'locations/12155833518075984673',
+      google_drive_folder_id: '1V7bcq1G3wKL9J3ID-UjmJZs_XBJZNQYy',
+      post_active: true,
+    },
+  });
+  console.log('🏢 Store account created/updated: いいとこ鍼灸院 (yeyuebinye99@gmail.com)');
+
+  // 6. Demo Store Keywords & Initial 3-day Drafts
   const mainKeywords = ['栄 美容室', '名古屋 髪質改善', '栄 カット', '髪質改善 サロン'];
   const subKeywords = ['完全個室サロン', '縮毛矯正 栄', '白髪染め 名古屋', 'トリートメント 推奨'];
   const fixedFooter = '店舗名: 美髪改善サロン Avenir Hair (アヴニールヘア)\n住所: 愛知県名古屋市中区栄3丁目\n営業時間: 10:00〜20:00 (完全予約制)\n定休日: 毎週月曜日\nご予約・お問い合わせはお気軽にどうぞ！';
