@@ -120,6 +120,8 @@ async function main() {
       google_location_id: 'locations/12155833518075984673',
       google_drive_folder_id: '1V7bcq1G3wKL9J3ID-UjmJZs_XBJZNQYy',
       post_active: false,
+      post_start_date: new Date('2026-11-01T00:00:00.000Z'),
+      is_medical: true,
     },
     create: {
       id: targetIitokoId,
@@ -131,11 +133,38 @@ async function main() {
       google_location_id: 'locations/12155833518075984673',
       google_drive_folder_id: '1V7bcq1G3wKL9J3ID-UjmJZs_XBJZNQYy',
       post_active: false,
+      post_start_date: new Date('2026-11-01T00:00:00.000Z'),
+      is_medical: true,
     },
   });
   console.log('🏢 Store account created/updated: いいとこ鍼灸院 (yeyuebinye99@gmail.com)');
 
-  // 6. Demo Store Keywords & Initial 3-day Drafts
+  // 6. いいとこ鍼灸院 Keywords & Medical Prompts Setup
+  const iitokoMainKeywords = ['鍼灸院', '鍼灸 治療', '自律神経 鍼灸', '肩こり 腰痛 鍼灸', 'いいとこ鍼灸院'];
+  const iitokoSubKeywords = ['東洋医学 ケア', '国家資格保有', '丁寧な問診', '自律神経の乱れ', '根本アプローチ', 'お体のメンテナンス'];
+  const iitokoFooter = '━━━━━━━━━━━━━━━━\nいいとこ鍼灸院\n📍 住所: 店舗情報より\n📞 お気軽にお問い合わせ・ご相談ください。\n━━━━━━━━━━━━━━━━';
+  const iitokoPrompt = '東洋医学に基づいた丁寧な問診と、自律神経の乱れや慢性的な体の不調に寄り添う施術の魅力をお伝えしてください。誇大広告や効果効能の断定は避け、医療広告ガイドラインに配慮した誠実で安心感のある文章にしてください。';
+
+  await prisma.shopKeywords.upsert({
+    where: { shop_id: targetIitokoId },
+    update: {
+      main_keywords: JSON.stringify(iitokoMainKeywords),
+      sub_keywords: JSON.stringify(iitokoSubKeywords),
+      fixed_footer: iitokoFooter,
+      custom_prompt: iitokoPrompt,
+      post_time_hour: 9,
+    },
+    create: {
+      shop_id: targetIitokoId,
+      main_keywords: JSON.stringify(iitokoMainKeywords),
+      sub_keywords: JSON.stringify(iitokoSubKeywords),
+      fixed_footer: iitokoFooter,
+      custom_prompt: iitokoPrompt,
+      post_time_hour: 9,
+    },
+  });
+
+  // 7. Demo Store Keywords & Initial 3-day Drafts
   const mainKeywords = ['栄 美容室', '名古屋 髪質改善', '栄 カット', '髪質改善 サロン'];
   const subKeywords = ['完全個室サロン', '縮毛矯正 栄', '白髪染め 名古屋', 'トリートメント 推奨'];
   const fixedFooter = '店舗名: 美髪改善サロン Avenir Hair (アヴニールヘア)\n住所: 愛知県名古屋市中区栄3丁目\n営業時間: 10:00〜20:00 (完全予約制)\n定休日: 毎週月曜日\nご予約・お問い合わせはお気軽にどうぞ！';
