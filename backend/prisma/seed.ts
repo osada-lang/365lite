@@ -152,14 +152,14 @@ async function main() {
         google_drive_folder_id: '1V7bcq1G3wKL9J3ID-UjmJZs_XBJZNQYy',
         post_active: false,
         post_start_date: new Date('2026-11-01T00:00:00.000Z'),
-        is_medical: false,
+        is_medical: true,
       },
     });
 
     const iitokoMainKeywords = ['鍼灸院', '鍼灸 治療', '自律神経 鍼灸', '肩こり 腰痛 鍼灸', 'いいとこ鍼灸院'];
     const iitokoSubKeywords = ['東洋医学 ケア', '国家資格保有', '丁寧な問診', '自律神経の乱れ', '根本アプローチ', 'お体のメンテナンス'];
     const iitokoFooter = '━━━━━━━━━━━━━━━━\nいいとこ鍼灸院\n📍 住所: 店舗情報より\n📞 お気軽にお問い合わせ・ご相談ください。\n━━━━━━━━━━━━━━━━';
-    const iitokoPrompt = '親しみやすく誠実なトーンで。いいとこ鍼灸院の魅力やこだわり、専門的な強みについて、お客様にとって有益で分かりやすい内容で発信してください。';
+    const iitokoPrompt = '東洋医学に基づいた丁寧な問診と、自律神経の乱れや慢性的な体の不調に寄り添う施術の魅力をお伝えしてください。誇大広告や効果効能の断定は避け、医療広告ガイドラインに配慮した誠実で安心感のある文章にしてください。';
 
     await prisma.shopKeywords.create({
       data: {
@@ -171,13 +171,13 @@ async function main() {
         post_time_hour: 9,
       },
     });
-    console.log('🏢 Store account & standard keywords created: いいとこ鍼灸院');
+    console.log('🏢 Store account & medical keywords created: いいとこ鍼灸院');
   } else {
     await prisma.shop.update({
       where: { id: targetIitokoId },
-      data: { is_medical: false }
+      data: { is_medical: true }
     });
-    console.log('🏢 Updated いいとこ鍼灸院 to standard prompt (is_medical: false)');
+    console.log('🏢 Updated いいとこ鍼灸院 to medical prompt (is_medical: true)');
   }
 
   console.log('🟢 Database seeding completed!');
