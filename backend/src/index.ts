@@ -2342,6 +2342,16 @@ app.listen(port, () => {
   .then(() => console.log(`✅ Master Admin Account synced successfully! (Email: ${masterEmail})`))
   .catch((e) => console.warn('⚠️ Could not auto-sync master admin account:', e.message || e));
 
+  // Clean up fake demo accounts (代理店X, Avenir Hair) from live database
+  prisma.shop.deleteMany({
+    where: {
+      OR: [
+        { id: { in: ['demo-agency-uuid', 'demo-store-uuid'] } },
+        { email: { in: ['meoseiha@avenir', 'lite@dairiten.x'] } }
+      ]
+    }
+  }).catch(() => {});
+
   console.log('⏱️ [Internal Scheduler] Initializing internal fallback scheduler (10-minute intervals)...');
   setInterval(async () => {
     try {
