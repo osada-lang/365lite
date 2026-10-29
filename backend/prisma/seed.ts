@@ -106,7 +106,7 @@ async function main() {
     console.log('🏢 Updated いいとこ鍼灸院 to medical prompt (is_medical: true)');
   }
 
-  // 5. 岐阜医療科大学可児キャンパス Store Account
+  // 5. 岐阜医療科学大学可児キャンパス Store Account
   const targetGifuMsId = 'shop-gifu-ms-uuid';
   const gifuMsExists = await prisma.shop.findFirst({
     where: {
@@ -121,7 +121,7 @@ async function main() {
     await prisma.shop.create({
       data: {
         id: targetGifuMsId,
-        name: '岐阜医療科大学可児キャンパス',
+        name: '岐阜医療科学大学可児キャンパス',
         email: 'gumsbd@u-gifu-ms.ac.jp',
         password: 'gums-kani-7842',
         role: 'OWNER',
@@ -129,10 +129,19 @@ async function main() {
         google_location_id: 'locations/17588616379376794749',
         google_drive_folder_id: '1qxqWG9bHEUwZZGKutgTo5PfnlDQPPwON',
         post_active: false,
-        is_medical: false,
+        is_medical: true,
       },
     });
-    console.log('🏢 Store account created: 岐阜医療科大学可児キャンパス (gumsbd@u-gifu-ms.ac.jp)');
+    console.log('🏢 Store account created: 岐阜医療科学大学可児キャンパス (gumsbd@u-gifu-ms.ac.jp)');
+  } else {
+    await prisma.shop.update({
+      where: { id: gifuMsExists.id },
+      data: {
+        name: '岐阜医療科学大学可児キャンパス',
+        is_medical: true,
+      }
+    });
+    console.log('🏢 Updated 岐阜医療科学大学可児キャンパス to medical prompt (is_medical: true)');
   }
 
   console.log('🟢 Database seeding completed!');
