@@ -172,6 +172,26 @@ export default function App() {
     }
   }, [userRole, token]);
 
+  // Parse URL parameters for magic login token on mount
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const urlToken = urlParams.get('token');
+
+    if (urlToken) {
+      setCurrentShop(null);
+      setLoggedInUser(null);
+      setDashboard(null);
+      setSettings(null);
+      setPhotos([]);
+      setIsViewingShop(false);
+      setIsPageLoading(true);
+      localStorage.removeItem('userRole');
+      localStorage.setItem('token', urlToken);
+      setToken(urlToken);
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+  }, []);
+
   // Initial session verification on mount/reload
   useEffect(() => {
     const verifySession = async () => {
@@ -188,12 +208,14 @@ export default function App() {
         if (res.ok) {
           const data = await res.json();
           setLoggedInUser(data.shop);
-          if (!currentShop) {
-            setCurrentShop(data.shop);
-          }
+          setCurrentShop(data.shop);
           setUserRole(data.shop.role);
           localStorage.setItem('userRole', data.shop.role);
           setIsViewingShop(data.shop.role !== 'ADMIN' && data.shop.role !== 'AGENCY');
+          if (data.newToken) {
+            localStorage.setItem('token', data.newToken);
+            setToken(data.newToken);
+          }
         } else {
           localStorage.removeItem('token');
           setToken(null);
